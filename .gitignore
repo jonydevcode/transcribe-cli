@@ -9,5 +9,19 @@ wheels/
 # Virtual environments
 .venv
 
+# Audio files
+*.aac
+*.aiff
+*.alac
+*.flac
+*.m4a
+*.m4b
+*.mp3
+*.oga
+*.ogg
+*.opus
 *.wav
+*.wma
+*.webm
+
 *.txt
