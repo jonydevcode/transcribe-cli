@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
+import platform
 from pathlib import Path
+from typing import NamedTuple
+
+if platform.system() == "Darwin":
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
 from transformers import AutoProcessor, CohereAsrForConditionalGeneration
@@ -11,7 +17,37 @@ MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh"})
 DEFAULT_CUDA_BATCH_SIZE = 32
+DEFAULT_MPS_BATCH_SIZE = 4
 DEFAULT_CPU_BATCH_SIZE = 1
+
+
+class RuntimeConfig(NamedTuple):
+    device: torch.device
+    dtype: torch.dtype
+    default_batch_size: int
+
+
+def resolve_runtime_config() -> RuntimeConfig:
+    if torch.cuda.is_available():
+        return RuntimeConfig(
+            device=torch.device("cuda"),
+            dtype=torch.float16,
+            default_batch_size=DEFAULT_CUDA_BATCH_SIZE,
+        )
+
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        return RuntimeConfig(
+            device=torch.device("mps"),
+            dtype=torch.float16,
+            default_batch_size=DEFAULT_MPS_BATCH_SIZE,
+        )
+
+    return RuntimeConfig(
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        default_batch_size=DEFAULT_CPU_BATCH_SIZE,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,7 +68,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Inference batch size for chunked long-form transcription. "
-            "Defaults to 32 on CUDA and 1 on CPU."
+            "Defaults to 32 on CUDA, 4 on Apple Silicon MPS, and 1 on CPU."
         ),
     )
     return parser.parse_args()
@@ -166,17 +202,18 @@ def main() -> None:
     args = parse_args()
     input_file = args.input_file.expanduser().resolve()
     validate_input_file(input_file)
+    runtime = resolve_runtime_config()
 
     processor = AutoProcessor.from_pretrained(MODEL_ID)
     model = CohereAsrForConditionalGeneration.from_pretrained(
         MODEL_ID,
-        device_map="auto",
-    )
+        torch_dtype=runtime.dtype,
+    ).to(runtime.device)
     model.eval()
 
     batch_size = args.batch_size
     if batch_size is None:
-        batch_size = DEFAULT_CUDA_BATCH_SIZE if torch.cuda.is_available() else DEFAULT_CPU_BATCH_SIZE
+        batch_size = runtime.default_batch_size
     if batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
 
@@ -191,7 +228,7 @@ def main() -> None:
 
     output_file = input_file.with_suffix(".txt")
     output_file.write_text(text.strip() + "\n", encoding="utf-8")
-    print(f"Wrote transcript to {output_file}")
+    print(f"Wrote transcript to {output_file} using {runtime.device.type} ({runtime.dtype})")
 
 
 if __name__ == "__main__":
