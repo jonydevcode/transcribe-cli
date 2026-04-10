@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import platform
+import shutil
+import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
 if platform.system() == "Darwin":
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
+import numpy as np
+import soundfile as sf
 import torch
 from transformers import AutoProcessor, CohereAsrForConditionalGeneration
-from transformers.audio_utils import load_audio
 
 MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
@@ -53,10 +57,14 @@ def resolve_runtime_config() -> RuntimeConfig:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Transcribe an audio file with Cohere Transcribe and write the result to INPUT.txt."
+            "Transcribe one or more audio files with Cohere Transcribe and write each result to INPUT.txt."
         )
     )
-    parser.add_argument("input_file", type=Path, help="Path to the source audio file.")
+    parser.add_argument(
+        "input_paths",
+        nargs="+",
+        help="One or more source audio paths or glob patterns.",
+    )
     parser.add_argument(
         "--language",
         default="en",
@@ -74,6 +82,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def expand_input_paths(input_paths: list[str]) -> list[Path]:
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+
+    for raw_path in input_paths:
+        matches = [Path(match) for match in glob.glob(raw_path)]
+        if not matches:
+            matches = [Path(raw_path)]
+
+        for match in matches:
+            resolved_path = match.expanduser().resolve()
+            if resolved_path in seen:
+                continue
+            seen.add(resolved_path)
+            resolved.append(resolved_path)
+
+    return resolved
+
+
 def validate_input_file(input_file: Path) -> None:
     if not input_file.is_file():
         raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -83,6 +110,72 @@ def validate_input_file(input_file: Path) -> None:
         raise ValueError(
             f"Unsupported input format '{input_file.suffix}'. Expected one of: {supported}"
         )
+
+
+def load_audio_with_ffmpeg(input_file: Path, sampling_rate: int) -> np.ndarray:
+    process = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(input_file),
+            "-f",
+            "f32le",
+            "-ac",
+            "1",
+            "-ar",
+            str(sampling_rate),
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    audio = np.frombuffer(process.stdout, dtype=np.float32)
+    if audio.size == 0:
+        raise ValueError(f"Decoded audio was empty: {input_file}")
+    return audio
+
+
+def can_decode_with_soundfile(input_file: Path) -> bool:
+    try:
+        sf.info(str(input_file))
+    except sf.LibsndfileError:
+        return False
+    return True
+
+
+def validate_decoder_dependencies(input_files: list[Path]) -> None:
+    files_requiring_ffmpeg = [
+        input_file for input_file in input_files if not can_decode_with_soundfile(input_file)
+    ]
+    if not files_requiring_ffmpeg:
+        return
+
+    if shutil.which("ffmpeg") is not None:
+        return
+
+    affected_files = "\n".join(f"- {input_file}" for input_file in files_requiring_ffmpeg)
+    raise RuntimeError(
+        "ffmpeg is required to decode one or more input files, but it was not found on PATH:\n"
+        f"{affected_files}"
+    )
+
+
+def load_audio_file(input_file: Path, sampling_rate: int = 16000) -> np.ndarray:
+    try:
+        audio, source_rate = sf.read(str(input_file), dtype="float32", always_2d=True)
+    except sf.LibsndfileError:
+        return load_audio_with_ffmpeg(input_file, sampling_rate)
+
+    if audio.size == 0:
+        raise ValueError(f"Decoded audio was empty: {input_file}")
+
+    mono_audio = audio.mean(axis=1)
+    if source_rate == sampling_rate:
+        return mono_audio
+
+    return load_audio_with_ffmpeg(input_file, sampling_rate)
 
 
 def move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
@@ -200,8 +293,12 @@ def batched_transcribe(
 
 def main() -> None:
     args = parse_args()
-    input_file = args.input_file.expanduser().resolve()
-    validate_input_file(input_file)
+    input_files = expand_input_paths(args.input_paths)
+    if not input_files:
+        raise ValueError("No input files were provided")
+    for input_file in input_files:
+        validate_input_file(input_file)
+    validate_decoder_dependencies(input_files)
     runtime = resolve_runtime_config()
 
     processor = AutoProcessor.from_pretrained(MODEL_ID)
@@ -217,18 +314,21 @@ def main() -> None:
     if batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
 
-    audio = load_audio(str(input_file), sampling_rate=16000)
-    text = batched_transcribe(
-        processor=processor,
-        model=model,
-        audio=audio,
-        language=args.language,
-        batch_size=batch_size,
-    )
+    for input_file in input_files:
+        audio = load_audio_file(input_file, sampling_rate=16000)
+        text = batched_transcribe(
+            processor=processor,
+            model=model,
+            audio=audio,
+            language=args.language,
+            batch_size=batch_size,
+        )
 
-    output_file = input_file.with_suffix(".txt")
-    output_file.write_text(text.strip() + "\n", encoding="utf-8")
-    print(f"Wrote transcript to {output_file} using {runtime.device.type} ({runtime.dtype})")
+        output_file = input_file.with_suffix(".txt")
+        output_file.write_text(text.strip() + "\n", encoding="utf-8")
+        print(
+            f"Wrote transcript to {output_file} using {runtime.device.type} ({runtime.dtype})"
+        )
 
 
 if __name__ == "__main__":
