@@ -17,9 +17,9 @@ if platform.system() == "Darwin":
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import AutoProcessor, CohereAsrForConditionalGeneration
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, PreTrainedModel
 
-MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
+DEFAULT_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh"})
 DEFAULT_CUDA_BATCH_SIZE = 32
@@ -59,13 +59,18 @@ def resolve_runtime_config() -> RuntimeConfig:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Transcribe one or more audio files with Cohere Transcribe and write each result to INPUT.txt."
+            "Transcribe one or more media files and write each result to INPUT.txt."
         )
     )
     parser.add_argument(
         "input_paths",
         nargs="+",
-        help="One or more source audio paths or glob patterns.",
+        help="One or more source media paths or glob patterns.",
+    )
+    parser.add_argument(
+        "--model-id",
+        default=DEFAULT_MODEL_ID,
+        help=f"Hugging Face ASR model ID. Default: {DEFAULT_MODEL_ID}",
     )
     parser.add_argument(
         "--language",
@@ -252,7 +257,7 @@ def reassemble_chunk_texts(
 def batched_transcribe(
     *,
     processor: AutoProcessor,
-    model: CohereAsrForConditionalGeneration,
+    model: PreTrainedModel,
     audio,
     language: str,
     batch_size: int,
@@ -303,9 +308,9 @@ def main() -> None:
     validate_decoder_dependencies(input_files)
     runtime = resolve_runtime_config()
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = CohereAsrForConditionalGeneration.from_pretrained(
-        MODEL_ID,
+    processor = AutoProcessor.from_pretrained(args.model_id)
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        args.model_id,
         torch_dtype=runtime.dtype,
     ).to(runtime.device)
     model.eval()
@@ -329,7 +334,8 @@ def main() -> None:
         output_file = input_file.with_suffix(".txt")
         output_file.write_text(text.strip() + "\n", encoding="utf-8")
         print(
-            f"Wrote transcript to {output_file} using {runtime.device.type} ({runtime.dtype})"
+            f"Wrote transcript to {output_file} with {args.model_id} "
+            f"using {runtime.device.type} ({runtime.dtype})"
         )
 
 

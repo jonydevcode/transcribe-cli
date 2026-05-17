@@ -1,7 +1,7 @@
 [project]
-name = "cohere-transcribe-03-2026"
+name = "transcribe-cli"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local audio and video transcription CLI"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
