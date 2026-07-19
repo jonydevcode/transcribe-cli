@@ -8,6 +8,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -311,7 +312,7 @@ def main() -> None:
     processor = AutoProcessor.from_pretrained(args.model_id)
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         args.model_id,
-        torch_dtype=runtime.dtype,
+        dtype=runtime.dtype,
     ).to(runtime.device)
     model.eval()
 
@@ -323,6 +324,8 @@ def main() -> None:
 
     for input_file in input_files:
         audio = load_audio_file(input_file, sampling_rate=16000)
+        audio_duration_seconds = len(audio) / 16000
+        transcription_started = time.perf_counter()
         text = batched_transcribe(
             processor=processor,
             model=model,
@@ -330,12 +333,18 @@ def main() -> None:
             language=args.language,
             batch_size=batch_size,
         )
+        transcription_seconds = time.perf_counter() - transcription_started
+        throughput = audio_duration_seconds / transcription_seconds
 
         output_file = input_file.with_suffix(".txt")
         output_file.write_text(text.strip() + "\n", encoding="utf-8")
         print(
             f"Wrote transcript to {output_file} with {args.model_id} "
             f"using {runtime.device.type} ({runtime.dtype})"
+        )
+        print(
+            f"Metrics for {input_file}: {audio_duration_seconds:.2f}s audio in "
+            f"{transcription_seconds:.2f}s ({throughput:.2f} audio sec/sec)"
         )
 
 
