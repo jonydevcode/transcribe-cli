@@ -132,7 +132,7 @@ uv run main.py INPUT.EXT --language fr
 - This CLI defaults to `--batch-size 32` on CUDA, `4` on Apple Silicon `mps`, and `1` on CPU
 - On macOS, the script enables `PYTORCH_ENABLE_MPS_FALLBACK=1` so unsupported ops can fall back to CPU instead of failing outright
 - The script does not create an intermediate converted audio file on disk
-- `sample.aac` obtained from the LJ Speech Dataset
+- Audio samples obtained from the LJ Speech Dataset
 
 ## Version Notes
 
