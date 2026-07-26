@@ -6,7 +6,8 @@ Copyright 2026 jonydevcode
 ![AI Use Disclosed](https://img.shields.io/badge/AI%20use-disclosed-orange)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue)](./LICENSE)
 
-Small `uv`-managed CLI for transcribing local audio and video files.
+Small Nix-managed CLI for transcribing local audio and video files on an AMD
+GPU.
 
 The script accepts one or more local media paths, runs offline transcription with a Hugging Face `transformers` model, and writes a `.txt` transcript next to each input.
 
@@ -28,67 +29,54 @@ All material is maintained under the repository’s license unless otherwise not
 - Supports selecting a Hugging Face ASR model via `--model-id`
 - Supports a configurable language code via `--language`
 - Supports configurable inference chunk batching via `--batch-size`
-- Managed with `uv`
+- Reproducible Python and ROCm dependencies supplied entirely by Nix
 
 ## Requirements
 
-- Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/)
+- x86_64 NixOS
+- An AMD GPU supported by ROCm and access to `/dev/kfd`
 - Enough disk space and memory for the model download and inference
 - Internet access on first run so Hugging Face assets can be downloaded
-- On x86_64 Linux, an AMD GPU supported by ROCm and access to `/dev/kfd`
-- On Apple Silicon, use an arm64 Python build so PyTorch can access the `mps` backend
 
 ## Installation
 
-Enter the development environment and install dependencies with:
+Enter the development environment:
 
 ```bash
 nix develop
-uv sync --frozen
-./scripts/link-rocm-libraries
 ```
 
-On x86_64 Linux, `uv` installs the ROCm build of PyTorch. Other supported
-platforms use the CPU build, with Apple Silicon inference accelerated through
-PyTorch MPS. PyTorch exposes ROCm devices through its CUDA-compatible Python API,
-so `torch.cuda.is_available()` is expected for AMD GPUs.
+The shell provides Python 3.13 and the Nixpkgs `torchWithRocm`, Transformers,
+Hugging Face Hub, audio dependencies, FFmpeg, and ROCm diagnostic tools. There
+is no separate dependency-install or environment-repair step. PyTorch exposes
+ROCm devices through its CUDA-compatible Python API, so
+`torch.cuda.is_available()` is expected for AMD GPUs.
 
-The link helper supplies versioned ELF library aliases omitted by the standalone
-ROCm wheel. It only adds missing symbolic links inside `.venv`; rerunning it is
-safe.
-
-The Nix shell selects ROCm's compatible `gfx1150` code path for the Radeon 860M
-(`gfx1152`). Without this override, the current ROCm runtime detects the GPU but
-crashes while compiling its first device kernel.
+When `rocminfo` detects the Radeon 860M (`gfx1152`), the shell selects ROCm's
+compatible `gfx1150` code path and enables experimental AOTriton attention for
+faster inference. These overrides are not set for other GPUs.
 
 Verify ROCm and PyTorch device access from `nix develop` with:
 
 ```bash
 rocminfo | grep -E 'Name:|gfx'
-uv run python -c 'import torch; print(torch.__version__); print("HIP:", torch.version.hip); print("available:", torch.cuda.is_available()); print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'
+python -c 'import torch; print(torch.__version__); print("HIP:", torch.version.hip); print("available:", torch.cuda.is_available()); print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'
 ```
 
 The model card currently recommends the native `transformers` path for offline inference and notes testing with `torch==2.10.0`, while expecting nearby versions to work.
-
-If you need to add or update packages later, use:
-
-```bash
-uv add PACKAGE_NAME
-```
 
 ## Basic Transcription
 
 Run a transcription with:
 
 ```bash
-uv run main.py INPUT.EXT
+python main.py INPUT.EXT
 ```
 
 Example:
 
 ```bash
-uv run main.py meeting.wav
+python main.py meeting.wav
 ```
 
 This writes:
@@ -102,25 +90,25 @@ into the same directory as the input file.
 For long files on GPU, you can reduce memory use further with:
 
 ```bash
-uv run main.py INPUT.EXT --batch-size 4
+python main.py INPUT.EXT --batch-size 4
 ```
 
 Use a different compatible Hugging Face ASR model with:
 
 ```bash
-uv run main.py INPUT.EXT --model-id MODEL_ID
+python main.py INPUT.EXT --model-id MODEL_ID
 ```
 
 Batch multiple files into one run to avoid reloading the model:
 
 ```bash
-uv run main.py a.mp3 b.mp3 c.mp3
+python main.py a.mp3 b.mp3 c.mp3
 ```
 
 Shell-expanded globs work too:
 
 ```bash
-uv run main.py 001-meeting/*
+python main.py 001-meeting/*
 ```
 
 ## Language Selection
@@ -128,13 +116,13 @@ uv run main.py 001-meeting/*
 The script defaults to English:
 
 ```bash
-uv run main.py INPUT.EXT --language en
+python main.py INPUT.EXT --language en
 ```
 
 Use a different ISO 639-1 language code if needed:
 
 ```bash
-uv run main.py INPUT.EXT --language fr
+python main.py INPUT.EXT --language fr
 ```
 
 ## How It Works
@@ -152,8 +140,7 @@ uv run main.py INPUT.EXT --language fr
 
 - First run will be slower because model code and weights must be downloaded
 - Long files can take significant time; GPU memory use depends heavily on `--batch-size`
-- This CLI defaults to `--batch-size 32` on ROCm GPU, `4` on Apple Silicon `mps`, and `1` on CPU
-- On macOS, the script enables `PYTORCH_ENABLE_MPS_FALLBACK=1` so unsupported ops can fall back to CPU instead of failing outright
+- This CLI defaults to `--batch-size 32` on ROCm GPU and `1` on CPU
 - The script does not create an intermediate converted audio file on disk
 - Audio samples obtained from the LJ Speech Dataset
 
@@ -161,14 +148,13 @@ uv run main.py INPUT.EXT --language fr
 
 - The current model card documents both the native `transformers` path and a `trust_remote_code=True` helper
 - This CLI uses the native path because the current model card identifies it as the recommended offline inference path
-- The runtime selects ROCm (through PyTorch's `cuda` device API), `mps`, or `cpu` explicitly instead of relying on `device_map="auto"`
+- The runtime selects ROCm (through PyTorch's `cuda` device API) or CPU explicitly instead of relying on `device_map="auto"`
 - Manual chunk batching is implemented in the CLI to avoid sending every long-form chunk through `generate(...)` in one large batch
 
 ## Project Files
 
 - `main.py`: CLI entrypoint
-- `pyproject.toml`: project metadata and dependencies
-- `uv.lock`: locked dependency versions
+- `flake.nix`: pinned Nix development environment and dependencies
 
 ## Current Model
 

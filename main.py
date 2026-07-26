@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import argparse
 import glob
-import os
-import platform
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import NamedTuple
-
-if platform.system() == "Darwin":
-    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import soundfile as sf
@@ -24,7 +19,6 @@ DEFAULT_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh"})
 DEFAULT_GPU_BATCH_SIZE = 32
-DEFAULT_MPS_BATCH_SIZE = 4
 DEFAULT_CPU_BATCH_SIZE = 1
 
 
@@ -40,14 +34,6 @@ def resolve_runtime_config() -> RuntimeConfig:
             device=torch.device("cuda"),
             dtype=torch.float16,
             default_batch_size=DEFAULT_GPU_BATCH_SIZE,
-        )
-
-    mps_backend = getattr(torch.backends, "mps", None)
-    if mps_backend is not None and mps_backend.is_available():
-        return RuntimeConfig(
-            device=torch.device("mps"),
-            dtype=torch.float16,
-            default_batch_size=DEFAULT_MPS_BATCH_SIZE,
         )
 
     return RuntimeConfig(
@@ -84,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Inference batch size for chunked long-form transcription. "
-            "Defaults to 32 on ROCm GPU, 4 on Apple Silicon MPS, and 1 on CPU."
+            "Defaults to 32 on ROCm GPU and 1 on CPU."
         ),
     )
     return parser.parse_args()
