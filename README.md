@@ -36,14 +36,37 @@ All material is maintained under the repository’s license unless otherwise not
 - [`uv`](https://docs.astral.sh/uv/)
 - Enough disk space and memory for the model download and inference
 - Internet access on first run so Hugging Face assets can be downloaded
+- On x86_64 Linux, an AMD GPU supported by ROCm and access to `/dev/kfd`
 - On Apple Silicon, use an arm64 Python build so PyTorch can access the `mps` backend
 
 ## Installation
 
-Install dependencies with:
+Enter the development environment and install dependencies with:
 
 ```bash
-uv sync
+nix develop
+uv sync --frozen
+./scripts/link-rocm-libraries
+```
+
+On x86_64 Linux, `uv` installs the ROCm build of PyTorch. Other supported
+platforms use the CPU build, with Apple Silicon inference accelerated through
+PyTorch MPS. PyTorch exposes ROCm devices through its CUDA-compatible Python API,
+so `torch.cuda.is_available()` is expected for AMD GPUs.
+
+The link helper supplies versioned ELF library aliases omitted by the standalone
+ROCm wheel. It only adds missing symbolic links inside `.venv`; rerunning it is
+safe.
+
+The Nix shell selects ROCm's compatible `gfx1150` code path for the Radeon 860M
+(`gfx1152`). Without this override, the current ROCm runtime detects the GPU but
+crashes while compiling its first device kernel.
+
+Verify ROCm and PyTorch device access from `nix develop` with:
+
+```bash
+rocminfo | grep -E 'Name:|gfx'
+uv run python -c 'import torch; print(torch.__version__); print("HIP:", torch.version.hip); print("available:", torch.cuda.is_available()); print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'
 ```
 
 The model card currently recommends the native `transformers` path for offline inference and notes testing with `torch==2.10.0`, while expecting nearby versions to work.
@@ -129,7 +152,7 @@ uv run main.py INPUT.EXT --language fr
 
 - First run will be slower because model code and weights must be downloaded
 - Long files can take significant time; GPU memory use depends heavily on `--batch-size`
-- This CLI defaults to `--batch-size 32` on CUDA, `4` on Apple Silicon `mps`, and `1` on CPU
+- This CLI defaults to `--batch-size 32` on ROCm GPU, `4` on Apple Silicon `mps`, and `1` on CPU
 - On macOS, the script enables `PYTORCH_ENABLE_MPS_FALLBACK=1` so unsupported ops can fall back to CPU instead of failing outright
 - The script does not create an intermediate converted audio file on disk
 - Audio samples obtained from the LJ Speech Dataset
@@ -138,7 +161,7 @@ uv run main.py INPUT.EXT --language fr
 
 - The current model card documents both the native `transformers` path and a `trust_remote_code=True` helper
 - This CLI uses the native path because the current model card identifies it as the recommended offline inference path
-- The runtime now selects `cuda`, `mps`, or `cpu` explicitly instead of relying on `device_map="auto"`, which is more predictable on macOS
+- The runtime selects ROCm (through PyTorch's `cuda` device API), `mps`, or `cpu` explicitly instead of relying on `device_map="auto"`
 - Manual chunk batching is implemented in the CLI to avoid sending every long-form chunk through `generate(...)` in one large batch
 
 ## Project Files

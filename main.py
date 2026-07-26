@@ -23,7 +23,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, PreTrainedMod
 DEFAULT_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh"})
-DEFAULT_CUDA_BATCH_SIZE = 32
+DEFAULT_GPU_BATCH_SIZE = 32
 DEFAULT_MPS_BATCH_SIZE = 4
 DEFAULT_CPU_BATCH_SIZE = 1
 
@@ -39,7 +39,7 @@ def resolve_runtime_config() -> RuntimeConfig:
         return RuntimeConfig(
             device=torch.device("cuda"),
             dtype=torch.float16,
-            default_batch_size=DEFAULT_CUDA_BATCH_SIZE,
+            default_batch_size=DEFAULT_GPU_BATCH_SIZE,
         )
 
     mps_backend = getattr(torch.backends, "mps", None)
@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Inference batch size for chunked long-form transcription. "
-            "Defaults to 32 on CUDA, 4 on Apple Silicon MPS, and 1 on CPU."
+            "Defaults to 32 on ROCm GPU, 4 on Apple Silicon MPS, and 1 on CPU."
         ),
     )
     return parser.parse_args()
