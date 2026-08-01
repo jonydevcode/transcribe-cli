@@ -18,7 +18,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, PreTrainedMod
 DEFAULT_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh"})
-DEFAULT_GPU_BATCH_SIZE = 32
+DEFAULT_GPU_BATCH_SIZE = 8
 DEFAULT_CPU_BATCH_SIZE = 1
 
 
