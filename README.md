@@ -140,13 +140,13 @@ python main.py INPUT.EXT --language fr
 
 - First run will be slower because model code and weights must be downloaded
 - Long files can take significant time; GPU memory use depends heavily on `--batch-size`
-- This CLI defaults to `--batch-size 32` on ROCm GPU and `1` on CPU
+- This CLI defaults to `--batch-size 8` on ROCm GPU and `1` on CPU
 - The script does not create an intermediate converted audio file on disk
 - Audio samples obtained from the LJ Speech Dataset
 
 ## Version Notes
 
-- The current model card documents both the native `transformers` path and a `trust_remote_code=True` helper
+- The current model card documents the native `transformers` path for offline inference
 - This CLI uses the native path because the current model card identifies it as the recommended offline inference path
 - The runtime selects ROCm (through PyTorch's `cuda` device API) or CPU explicitly instead of relying on `device_map="auto"`
 - Manual chunk batching is implemented in the CLI to avoid sending every long-form chunk through `generate(...)` in one large batch
