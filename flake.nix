@@ -9,15 +9,28 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
-      python = pkgs.python313.withPackages (pythonPackages: with pythonPackages; [
-        torchWithRocm
-        transformers
-        huggingface-hub
-        librosa
-        protobuf
-        sentencepiece
-        soundfile
-      ]);
+      python = pkgs.python313.withPackages (pythonPackages:
+        let
+          # Native Qwen3-ASR support starts with Transformers 5.13.
+          transformersWithQwen = pythonPackages.transformers.overridePythonAttrs (_: {
+            version = "5.13.1";
+            src = pkgs.fetchFromGitHub {
+              owner = "huggingface";
+              repo = "transformers";
+              rev = "v5.13.1";
+              hash = "sha256-7khrrnATvSl7Wo8yvsZ2Shyzv6saXUkcs8lvF23Fbe4=";
+            };
+          });
+        in
+        with pythonPackages; [
+          torchWithRocm
+          transformersWithQwen
+          huggingface-hub
+          librosa
+          protobuf
+          sentencepiece
+          soundfile
+        ]);
     in
     {
       devShells.${system}.default = pkgs.mkShell {

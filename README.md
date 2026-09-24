@@ -9,9 +9,9 @@ Copyright 2026 jonydevcode
 Small Nix-managed CLI for transcribing local audio and video files on an AMD
 GPU.
 
-The script accepts one or more local media paths, runs offline transcription with a Hugging Face `transformers` model, and writes a `.txt` transcript next to each input.
+The script accepts one or more local media paths, runs offline transcription with a Hugging Face `transformers` model, and writes a `.txt` transcript next to each input. Choose Cohere Transcribe (the default) or Qwen3-ASR-0.6B with `--model`.
 
-For the moment, [`CohereLabs/cohere-transcribe-03-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) is the selected transcription model because it has produced high quality results. The project is intended to be a model-agnostic transcription CLI, not a Cohere-specific wrapper.
+[`CohereLabs/cohere-transcribe-03-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) remains the default because it has produced high quality results. The Qwen option uses the [official Transformers-native 0.6B checkpoint](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf).
 
 ## AI Use Disclosure
 
@@ -23,11 +23,11 @@ All material is maintained under the repository’s license unless otherwise not
 
 - Accepts common input formats such as `mp3`, `m4a`, `mp4`, `ogg`, `wav`, `flac`, `aac`, and `webm`
 - Accepts multiple input files or glob patterns in a single invocation
-- Uses the selected model's native long-form chunking and transcript reassembly path
+- Uses Cohere's native long-form chunking or 60-second Qwen chunks with automatic language detection on each chunk
 - Loads the model once per CLI invocation, then transcribes each input in sequence
 - Writes output to `INPUT.txt`
-- Supports selecting a Hugging Face ASR model via `--model-id`
-- Supports a configurable language code via `--language`
+- Selects Cohere or Qwen with `--model`; `--model-id` can override the checkpoint for the selected model family
+- Supports a configurable language code via `--language`; Qwen defaults to automatic detection for mixed English and Chinese audio
 - Supports configurable inference chunk batching via `--batch-size`
 - Reproducible Python and ROCm dependencies supplied entirely by Nix
 
@@ -46,7 +46,7 @@ Enter the development environment:
 nix develop
 ```
 
-The shell provides Python 3.13 and the Nixpkgs `torchWithRocm`, Transformers,
+The shell provides Python 3.13 and the Nixpkgs `torchWithRocm`, Transformers 5.13.1,
 Hugging Face Hub, audio dependencies, FFmpeg, and ROCm diagnostic tools. There
 is no separate dependency-install or environment-repair step. PyTorch exposes
 ROCm devices through its CUDA-compatible Python API, so
@@ -63,7 +63,7 @@ rocminfo | grep -E 'Name:|gfx'
 python -c 'import torch; print(torch.__version__); print("HIP:", torch.version.hip); print("available:", torch.cuda.is_available()); print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)'
 ```
 
-The model card currently recommends the native `transformers` path for offline inference and notes testing with `torch==2.10.0`, while expecting nearby versions to work.
+The Cohere model card recommends the native `transformers` path for offline inference and notes testing with `torch==2.10.0`, while expecting nearby versions to work.
 
 ## Basic Transcription
 
@@ -87,17 +87,35 @@ meeting.txt
 
 into the same directory as the input file.
 
-For long files on GPU, you can reduce memory use further with:
+The default is Cohere. You can select it explicitly with `--model cohere`.
+
+For long Cohere files on GPU, you can reduce memory use with:
 
 ```bash
 python main.py INPUT.EXT --batch-size 4
 ```
 
-Use a different compatible Hugging Face ASR model with:
+Select Qwen3-ASR-0.6B, with automatic language detection across English and Chinese segments:
+
+```bash
+python main.py INPUT.EXT --model qwen
+```
+
+`--model qwen` loads `Qwen/Qwen3-ASR-0.6B-hf`. It uses the same ROCm GPU selection as Cohere and defaults to a batch size of `1` to limit memory use. On a 64.58-second WAV recorded with a Radeon 860M, this checkpoint took 13.33–14.16 seconds (4.56–4.84× real-time), compared with about 30–31 seconds for the 1.7B checkpoint.
+
+To use the larger Qwen model instead:
+
+```bash
+python main.py INPUT.EXT --model qwen --model-id Qwen/Qwen3-ASR-1.7B-hf
+```
+
+Use a different compatible Hugging Face checkpoint for the selected model family with:
 
 ```bash
 python main.py INPUT.EXT --model-id MODEL_ID
 ```
+
+The checkpoint must support the selected model's processor and inference path. The original Qwen checkpoints use Qwen's separate `qwen-asr` package; use the `-hf` checkpoints with this CLI.
 
 Batch multiple files into one run to avoid reloading the model:
 
@@ -113,7 +131,7 @@ python main.py 001-meeting/*
 
 ## Language Selection
 
-The script defaults to English:
+The Cohere model defaults to English:
 
 ```bash
 python main.py INPUT.EXT --language en
@@ -125,29 +143,34 @@ Use a different ISO 639-1 language code if needed:
 python main.py INPUT.EXT --language fr
 ```
 
+Qwen detects the language of each audio chunk by default. Leave `--language` unset for audio containing both English and Chinese. `--language en` or `--language zh` forces a single language.
+
+## Q4 Quantization
+
+A community [Q4_K_M GGUF of Qwen3-ASR-1.7B](https://huggingface.co/slyusarev/Qwen3-ASR-1.7B-GGUF) is available at about 1.28 GB, plus its required `mmproj` file. It runs with llama.cpp. The CLI's Qwen option uses Transformers checkpoints and does not load GGUF files.
+
 ## How It Works
 
 - `main.py` expands input glob patterns, validates each path and extension, and deduplicates repeated matches
-- The script loads the current `transformers` processor and ASR model class
+- The script loads the processor and model class for the selected model
 - It decodes and resamples each input with `load_audio(..., sampling_rate=16000)`
-- The processor chunks long audio and returns `audio_chunk_index` for transcript reassembly
-- The script calls `model.generate(...)` in explicit mini-batches over the generated chunks
-- Generated tokens are trimmed to remove the decoder prompt before text decoding
-- The processor reassembles the per-chunk text into one transcript
+- Cohere's processor chunks long audio and returns `audio_chunk_index` for transcript reassembly
+- Qwen audio is split into 60-second chunks and passed through `apply_transcription_request` without a language hint by default; its decoded output is reduced to transcription text
+- Both models call `model.generate(...)` in explicit mini-batches and use the same PyTorch ROCm device selection
 - Each transcript is written to a `.txt` file using the same base filename as its source input
 
 ## Notes
 
 - First run will be slower because model code and weights must be downloaded
 - Long files can take significant time; GPU memory use depends heavily on `--batch-size`
-- This CLI defaults to `--batch-size 8` on ROCm GPU and `1` on CPU
+- Cohere defaults to `--batch-size 8` on ROCm GPU and `1` on CPU; Qwen defaults to `1` to limit memory use
 - The script does not create an intermediate converted audio file on disk
 - Audio samples obtained from the LJ Speech Dataset
 
 ## Version Notes
 
-- The current model card documents the native `transformers` path for offline inference
-- This CLI uses the native path because the current model card identifies it as the recommended offline inference path
+- The Cohere model card documents the native `transformers` path for offline inference
+- Qwen uses its official Transformers-native conversion, which requires Transformers 5.13 or newer
 - The runtime selects ROCm (through PyTorch's `cuda` device API) or CPU explicitly instead of relying on `device_map="auto"`
 - Manual chunk batching is implemented in the CLI to avoid sending every long-form chunk through `generate(...)` in one large batch
 
@@ -155,12 +178,16 @@ python main.py INPUT.EXT --language fr
 
 - `main.py`: CLI entrypoint
 - `flake.nix`: pinned Nix development environment and dependencies
+- `test_main.py`: focused CLI and Qwen chunking tests
+- `AGENTS.md`: quick start for future agents
+
+Run the focused tests from the development shell with `python -m unittest -v test_main`. The Nix shell and Qwen processor/config have been checked; full Qwen inference requires downloading the model weights.
 
 ## Current Model
 
-- Selected model: <https://huggingface.co/CohereLabs/cohere-transcribe-03-2026>
-- Rationale: currently selected because it has produced high quality transcription results
-- Direction: keep the CLI model-agnostic where practical so future models can be evaluated or substituted
+- Default model: <https://huggingface.co/CohereLabs/cohere-transcribe-03-2026>
+- Qwen default: <https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf>
+- Larger Qwen option: <https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf>
 
 ## Reference
 

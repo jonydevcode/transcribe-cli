@@ -15,11 +15,15 @@ import soundfile as sf
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, PreTrainedModel
 
-DEFAULT_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
+COHERE_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
+QWEN_MODEL_ID = "Qwen/Qwen3-ASR-0.6B-hf"
+MODEL_IDS = {"cohere": COHERE_MODEL_ID, "qwen": QWEN_MODEL_ID}
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh"})
 DEFAULT_GPU_BATCH_SIZE = 8
 DEFAULT_CPU_BATCH_SIZE = 1
+QWEN_CHUNK_SECONDS = 60
+SAMPLE_RATE = 16000
 
 
 class RuntimeConfig(NamedTuple):
@@ -55,14 +59,20 @@ def parse_args() -> argparse.Namespace:
         help="One or more source media paths or glob patterns.",
     )
     parser.add_argument(
+        "--model",
+        choices=MODEL_IDS,
+        default="cohere",
+        help="Transcription model. Default: cohere",
+    )
+    parser.add_argument(
         "--model-id",
-        default=DEFAULT_MODEL_ID,
-        help=f"Hugging Face ASR model ID. Default: {DEFAULT_MODEL_ID}",
+        default=None,
+        help="Override the selected model's Hugging Face model ID.",
     )
     parser.add_argument(
         "--language",
-        default="en",
-        help="ISO 639-1 language code required by the model. Default: en",
+        default=None,
+        help="Language code. Defaults to en for Cohere and auto-detection for Qwen.",
     )
     parser.add_argument(
         "--batch-size",
@@ -70,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Inference batch size for chunked long-form transcription. "
-            "Defaults to 32 on ROCm GPU and 1 on CPU."
+            "Cohere defaults to 8 on ROCm GPU and 1 on CPU; Qwen defaults to 1."
         ),
     )
     return parser.parse_args()
@@ -285,8 +295,46 @@ def batched_transcribe(
     return merged[0].strip()
 
 
+def join_qwen_chunks(texts: list[str]) -> str:
+    output = ""
+    for text in texts:
+        text = text.strip()
+        if not text:
+            continue
+        if output and not ("\u4e00" <= output[-1] <= "\u9fff" and "\u4e00" <= text[0] <= "\u9fff"):
+            output += " "
+        output += text
+    return output
+
+
+def qwen_transcribe(
+    *,
+    processor: AutoProcessor,
+    model: PreTrainedModel,
+    audio: np.ndarray,
+    language: str | None,
+    batch_size: int,
+) -> str:
+    chunk_samples = QWEN_CHUNK_SECONDS * SAMPLE_RATE
+    texts: list[str] = []
+    for start in range(0, len(audio), chunk_samples * batch_size):
+        chunks = [
+            audio[offset : offset + chunk_samples]
+            for offset in range(start, min(start + chunk_samples * batch_size, len(audio)), chunk_samples)
+        ]
+        request = processor.apply_transcription_request(audio=chunks, language=language)
+        request = request.to(model.device, model.dtype)
+        with torch.inference_mode():
+            outputs = model.generate(**request, max_new_tokens=1024, do_sample=False)
+        generated_ids = outputs[:, request["input_ids"].shape[1] :]
+        texts.extend(processor.decode(generated_ids, return_format="transcription_only"))
+    return join_qwen_chunks(texts)
+
+
 def main() -> None:
     args = parse_args()
+    model_id = args.model_id or MODEL_IDS[args.model]
+    language = args.language if args.language is not None else ("en" if args.model == "cohere" else None)
     input_files = expand_input_paths(args.input_paths)
     if not input_files:
         raise ValueError("No input files were provided")
@@ -295,37 +343,49 @@ def main() -> None:
     validate_decoder_dependencies(input_files)
     runtime = resolve_runtime_config()
 
-    processor = AutoProcessor.from_pretrained(args.model_id)
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(
-        args.model_id,
-        dtype=runtime.dtype,
-    ).to(runtime.device)
+    processor = AutoProcessor.from_pretrained(model_id)
+    if args.model == "qwen":
+        from transformers import AutoModelForMultimodalLM
+
+        model_class = AutoModelForMultimodalLM
+    else:
+        model_class = AutoModelForSpeechSeq2Seq
+    model = model_class.from_pretrained(model_id, dtype=runtime.dtype).to(runtime.device)
     model.eval()
 
     batch_size = args.batch_size
     if batch_size is None:
-        batch_size = runtime.default_batch_size
+        batch_size = 1 if args.model == "qwen" else runtime.default_batch_size
     if batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
 
     for input_file in input_files:
-        audio = load_audio_file(input_file, sampling_rate=16000)
-        audio_duration_seconds = len(audio) / 16000
+        audio = load_audio_file(input_file, sampling_rate=SAMPLE_RATE)
+        audio_duration_seconds = len(audio) / SAMPLE_RATE
         transcription_started = time.perf_counter()
-        text = batched_transcribe(
-            processor=processor,
-            model=model,
-            audio=audio,
-            language=args.language,
-            batch_size=batch_size,
-        )
+        if args.model == "qwen":
+            text = qwen_transcribe(
+                processor=processor,
+                model=model,
+                audio=audio,
+                language=language,
+                batch_size=batch_size,
+            )
+        else:
+            text = batched_transcribe(
+                processor=processor,
+                model=model,
+                audio=audio,
+                language=language,
+                batch_size=batch_size,
+            )
         transcription_seconds = time.perf_counter() - transcription_started
         throughput = audio_duration_seconds / transcription_seconds
 
         output_file = input_file.with_suffix(".txt")
         output_file.write_text(text.strip() + "\n", encoding="utf-8")
         print(
-            f"Wrote transcript to {output_file} with {args.model_id} "
+            f"Wrote transcript to {output_file} with {model_id} "
             f"using {runtime.device.type} ({runtime.dtype})"
         )
         print(
