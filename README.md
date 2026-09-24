@@ -9,9 +9,9 @@ Copyright 2026 jonydevcode
 Small Nix-managed CLI for transcribing local audio and video files on an AMD
 GPU.
 
-The script accepts one or more local media paths, runs offline transcription with a Hugging Face `transformers` model, and writes a `.txt` transcript next to each input. Choose Cohere Transcribe (the default) or Qwen3-ASR-0.6B with `--model`.
+The script accepts one or more local media paths, runs offline transcription with a Hugging Face `transformers` model, and writes a `.txt` transcript next to each input. Choose Cohere Transcribe (the default), Qwen3-ASR-0.6B, or Nemotron 3.5 ASR with `--model`.
 
-[`CohereLabs/cohere-transcribe-03-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) remains the default because it has produced high quality results. The Qwen option uses the [official Transformers-native 0.6B checkpoint](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf).
+[`CohereLabs/cohere-transcribe-03-2026`](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) remains the default because it has produced high quality results. The Qwen option uses the [official Transformers-native 0.6B checkpoint](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf). The Nemotron option uses [NVIDIA's Transformers-compatible 0.6B checkpoint](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b).
 
 ## AI Use Disclosure
 
@@ -23,11 +23,11 @@ All material is maintained under the repository’s license unless otherwise not
 
 - Accepts common input formats such as `mp3`, `m4a`, `mp4`, `ogg`, `wav`, `flac`, `aac`, and `webm`
 - Accepts multiple input files or glob patterns in a single invocation
-- Uses Cohere's native long-form chunking or 60-second Qwen chunks with automatic language detection on each chunk
+- Uses Cohere's native long-form chunking or 60-second Qwen and Nemotron chunks with automatic language detection on each chunk
 - Loads the model once per CLI invocation, then transcribes each input in sequence
 - Writes output to `INPUT.txt`
-- Selects Cohere or Qwen with `--model`; `--model-id` can override the checkpoint for the selected model family
-- Supports a configurable language code via `--language`; Qwen defaults to automatic detection for mixed English and Chinese audio
+- Selects Cohere, Qwen, or Nemotron with `--model`; `--model-id` can override the checkpoint for the selected model family
+- Supports a configurable language code via `--language`; Qwen and Nemotron default to automatic detection
 - Supports configurable inference chunk batching via `--batch-size`
 - Reproducible Python and ROCm dependencies supplied entirely by Nix
 
@@ -109,6 +109,14 @@ To use the larger Qwen model instead:
 python main.py INPUT.EXT --model qwen --model-id Qwen/Qwen3-ASR-1.7B-hf
 ```
 
+Select Nemotron 3.5 ASR with automatic language detection:
+
+```bash
+python main.py INPUT.EXT --model nemotron
+```
+
+This uses `nvidia/nemotron-3.5-asr-streaming-0.6b` through Transformers' offline RNNT interface. The CLI splits long files into 60-second chunks and defaults to a batch size of `1`. It writes clean transcript text; Nemotron's detected language tags are removed during decoding. This option does not expose live streaming.
+
 Use a different compatible Hugging Face checkpoint for the selected model family with:
 
 ```bash
@@ -145,6 +153,8 @@ python main.py INPUT.EXT --language fr
 
 Qwen detects the language of each audio chunk by default. Leave `--language` unset for audio containing both English and Chinese. `--language en` or `--language zh` forces a single language.
 
+Nemotron also detects the language of each chunk by default. Use a supported locale such as `--language en-US` or `--language de-DE` to condition transcription on a known language. It also accepts bare language codes such as `de`, or `--language auto`. See the [Nemotron model card](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b) for supported locales and accuracy tiers.
+
 ## Q4 Quantization
 
 A community [Q4_K_M GGUF of Qwen3-ASR-1.7B](https://huggingface.co/slyusarev/Qwen3-ASR-1.7B-GGUF) is available at about 1.28 GB, plus its required `mmproj` file. It runs with llama.cpp. The CLI's Qwen option uses Transformers checkpoints and does not load GGUF files.
@@ -156,7 +166,8 @@ A community [Q4_K_M GGUF of Qwen3-ASR-1.7B](https://huggingface.co/slyusarev/Qwe
 - It decodes and resamples each input with `load_audio(..., sampling_rate=16000)`
 - Cohere's processor chunks long audio and returns `audio_chunk_index` for transcript reassembly
 - Qwen audio is split into 60-second chunks and passed through `apply_transcription_request` without a language hint by default; its decoded output is reduced to transcription text
-- Both models call `model.generate(...)` in explicit mini-batches and use the same PyTorch ROCm device selection
+- Nemotron audio is split into 60-second chunks, processed with an automatic language prompt by default, and decoded without language tags
+- All models call `model.generate(...)` in explicit mini-batches and use the same PyTorch ROCm device selection
 - Each transcript is written to a `.txt` file using the same base filename as its source input
 
 ## Notes
@@ -171,6 +182,7 @@ A community [Q4_K_M GGUF of Qwen3-ASR-1.7B](https://huggingface.co/slyusarev/Qwe
 
 - The Cohere model card documents the native `transformers` path for offline inference
 - Qwen uses its official Transformers-native conversion, which requires Transformers 5.13 or newer
+- Nemotron 3.5 ASR uses Transformers' native RNNT implementation, available in Transformers 5.13 or newer
 - The runtime selects ROCm (through PyTorch's `cuda` device API) or CPU explicitly instead of relying on `device_map="auto"`
 - Manual chunk batching is implemented in the CLI to avoid sending every long-form chunk through `generate(...)` in one large batch
 
@@ -178,15 +190,16 @@ A community [Q4_K_M GGUF of Qwen3-ASR-1.7B](https://huggingface.co/slyusarev/Qwe
 
 - `main.py`: CLI entrypoint
 - `flake.nix`: pinned Nix development environment and dependencies
-- `test_main.py`: focused CLI and Qwen chunking tests
+- `test_main.py`: focused CLI and model chunking tests
 - `AGENTS.md`: quick start for future agents
 
-Run the focused tests from the development shell with `python -m unittest -v test_main`. The Nix shell and Qwen processor/config have been checked; full Qwen inference requires downloading the model weights.
+Run the focused tests from the development shell with `python -m unittest -v test_main`. Full Qwen and Nemotron inference requires downloading their model weights.
 
-## Current Model
+## Model Checkpoints
 
 - Default model: <https://huggingface.co/CohereLabs/cohere-transcribe-03-2026>
 - Qwen default: <https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf>
+- Nemotron default: <https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b>
 - Larger Qwen option: <https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf>
 
 ## Reference

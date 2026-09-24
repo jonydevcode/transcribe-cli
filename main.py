@@ -17,12 +17,14 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, PreTrainedMod
 
 COHERE_MODEL_ID = "CohereLabs/cohere-transcribe-03-2026"
 QWEN_MODEL_ID = "Qwen/Qwen3-ASR-0.6B-hf"
-MODEL_IDS = {"cohere": COHERE_MODEL_ID, "qwen": QWEN_MODEL_ID}
+NEMOTRON_MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
+MODEL_IDS = {"cohere": COHERE_MODEL_ID, "qwen": QWEN_MODEL_ID, "nemotron": NEMOTRON_MODEL_ID}
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh"})
 DEFAULT_GPU_BATCH_SIZE = 8
 DEFAULT_CPU_BATCH_SIZE = 1
 QWEN_CHUNK_SECONDS = 60
+NEMOTRON_CHUNK_SECONDS = 60
 SAMPLE_RATE = 16000
 
 
@@ -72,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--language",
         default=None,
-        help="Language code. Defaults to en for Cohere and auto-detection for Qwen.",
+        help="Language code. Defaults to en for Cohere and auto-detection for Qwen and Nemotron.",
     )
     parser.add_argument(
         "--batch-size",
@@ -80,7 +82,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Inference batch size for chunked long-form transcription. "
-            "Cohere defaults to 8 on ROCm GPU and 1 on CPU; Qwen defaults to 1."
+            "Cohere defaults to 8 on ROCm GPU and 1 on CPU; Qwen and Nemotron default to 1."
         ),
     )
     return parser.parse_args()
@@ -182,10 +184,12 @@ def load_audio_file(input_file: Path, sampling_rate: int = 16000) -> np.ndarray:
     return load_audio_with_ffmpeg(input_file, sampling_rate)
 
 
-def move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
-    moved: dict[str, torch.Tensor] = {}
+def move_batch_to_device(batch: dict[str, torch.Tensor | int], device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor | int]:
+    moved: dict[str, torch.Tensor | int] = {}
     for key, value in batch.items():
-        if value.is_floating_point():
+        if not isinstance(value, torch.Tensor):
+            moved[key] = value
+        elif value.is_floating_point():
             moved[key] = value.to(device=device, dtype=dtype)
         else:
             moved[key] = value.to(device=device)
@@ -331,10 +335,41 @@ def qwen_transcribe(
     return join_qwen_chunks(texts)
 
 
+def nemotron_transcribe(
+    *,
+    processor: AutoProcessor,
+    model: PreTrainedModel,
+    audio: np.ndarray,
+    language: str,
+    batch_size: int,
+) -> str:
+    chunk_samples = NEMOTRON_CHUNK_SECONDS * SAMPLE_RATE
+    texts: list[str] = []
+    for start in range(0, len(audio), chunk_samples * batch_size):
+        chunks = [
+            audio[offset : offset + chunk_samples]
+            for offset in range(start, min(start + chunk_samples * batch_size, len(audio)), chunk_samples)
+        ]
+        inputs = processor(
+            chunks,
+            sampling_rate=SAMPLE_RATE,
+            language=language,
+            return_tensors="pt",
+            padding=True,
+        )
+        inputs = move_batch_to_device(inputs, model.device, model.dtype)
+        with torch.inference_mode():
+            outputs = model.generate(**inputs, return_dict_in_generate=True)
+        texts.extend(processor.batch_decode(outputs.sequences, skip_special_tokens=True))
+    return join_qwen_chunks(texts)
+
+
 def main() -> None:
     args = parse_args()
     model_id = args.model_id or MODEL_IDS[args.model]
-    language = args.language if args.language is not None else ("en" if args.model == "cohere" else None)
+    language = args.language if args.language is not None else (
+        "en" if args.model == "cohere" else "auto" if args.model == "nemotron" else None
+    )
     input_files = expand_input_paths(args.input_paths)
     if not input_files:
         raise ValueError("No input files were provided")
@@ -348,6 +383,10 @@ def main() -> None:
         from transformers import AutoModelForMultimodalLM
 
         model_class = AutoModelForMultimodalLM
+    elif args.model == "nemotron":
+        from transformers import AutoModelForRNNT
+
+        model_class = AutoModelForRNNT
     else:
         model_class = AutoModelForSpeechSeq2Seq
     model = model_class.from_pretrained(model_id, dtype=runtime.dtype).to(runtime.device)
@@ -355,7 +394,7 @@ def main() -> None:
 
     batch_size = args.batch_size
     if batch_size is None:
-        batch_size = 1 if args.model == "qwen" else runtime.default_batch_size
+        batch_size = 1 if args.model in {"qwen", "nemotron"} else runtime.default_batch_size
     if batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
 
@@ -365,6 +404,14 @@ def main() -> None:
         transcription_started = time.perf_counter()
         if args.model == "qwen":
             text = qwen_transcribe(
+                processor=processor,
+                model=model,
+                audio=audio,
+                language=language,
+                batch_size=batch_size,
+            )
+        elif args.model == "nemotron":
+            text = nemotron_transcribe(
                 processor=processor,
                 model=model,
                 audio=audio,
