@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -26,6 +27,8 @@ MODEL_FILES = {
 }
 COMMON_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"}
 SAMPLE_RATE = 16000
+# Practical chunk sizes for bounded GPU memory use. The upstream per-call
+# limits describe what the model accepts, not what fits in available memory.
 CHUNK_SECONDS = {"cohere": 30, "qwen": 60, "parakeet": 300, "nemotron": 60}
 
 
@@ -116,20 +119,61 @@ def resolve_model_file(model: str, model_id: str | None) -> Path:
     return Path(hf_hub_download(repo_id=repo, filename=filename))
 
 
-def convert_and_chunk(input_file: Path, directory: Path, chunk_seconds: int) -> tuple[list[Path], float]:
-    wav = directory / "audio.wav"
-    subprocess.run(
-        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(input_file),
-         "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
-        check=True,
+def describe_input(input_file: Path) -> str:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "stream=codec_name,sample_rate,channels,bits_per_sample,bits_per_raw_sample",
+         "-of", "json", str(input_file)],
+        capture_output=True, text=True, check=True,
     )
+    streams = json.loads(result.stdout).get("streams", [])
+    if not streams:
+        raise ValueError(f"No audio stream found: {input_file}")
+    stream = streams[0]
+    codec = stream.get("codec_name", "unknown").upper()
+    if codec.startswith("PCM_"):
+        codec = "PCM"
+    bits = stream.get("bits_per_raw_sample")
+    if not bits or not str(bits).isdigit() or int(bits) == 0:
+        bits = stream.get("bits_per_sample")
+    if bits and str(bits).isdigit() and int(bits) > 0:
+        codec = f"{bits}-bit {codec}"
+    channels = stream.get("channels")
+    layout = "mono" if channels == 1 else "stereo" if channels == 2 else f"{channels} channels"
+    rate = int(stream["sample_rate"]) / 1000
+    container = input_file.suffix[1:].upper()
+    format_name = f"{codec} audio" if codec == container else f"{codec} {container}"
+    return f"{format_name}, {rate:g} kHz, {layout}"
+
+
+def convert_and_chunk(input_file: Path, directory: Path, chunk_seconds: int | None) -> tuple[list[Path], float]:
+    wav = directory / "audio.wav"
+    direct_wav = False
+    if input_file.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(input_file), "rb") as reader:
+                direct_wav = (reader.getnchannels(), reader.getframerate(), reader.getsampwidth(),
+                              reader.getcomptype()) == (1, SAMPLE_RATE, 2, "NONE")
+        except (wave.Error, EOFError):
+            pass
+    if direct_wav:
+        wav = input_file
+    else:
+        print(f"Converting to 16-bit PCM WAV, 16 kHz, mono: {input_file}", flush=True)
+        conversion_started = time.perf_counter()
+        subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(input_file),
+             "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
+            check=True,
+        )
+        print(f"Conversion completed in {time.perf_counter() - conversion_started:.2f}s", flush=True)
     with wave.open(str(wav), "rb") as reader:
         if (reader.getnchannels(), reader.getframerate(), reader.getsampwidth()) != (1, SAMPLE_RATE, 2):
             raise RuntimeError(f"ffmpeg produced an invalid WAV: {input_file}")
         total_frames = reader.getnframes()
         if total_frames == 0:
             raise ValueError(f"Decoded audio was empty: {input_file}")
-        if total_frames <= chunk_seconds * SAMPLE_RATE:
+        if chunk_seconds is None or total_frames <= chunk_seconds * SAMPLE_RATE:
             return [wav], total_frames / SAMPLE_RATE
         chunks: list[Path] = []
         index = 0
@@ -157,6 +201,22 @@ def join_chunks(texts: list[str]) -> str:
     return result
 
 
+def split_wav(wav: Path) -> list[Path]:
+    with wave.open(str(wav), "rb") as reader:
+        frames = reader.getnframes()
+        midpoint = frames // 2
+        if midpoint < SAMPLE_RATE:
+            raise RuntimeError(f"transcribe.cpp still truncated audio shorter than two seconds: {wav}")
+        params = reader.getparams()
+        halves = [reader.readframes(midpoint), reader.readframes(frames - midpoint)]
+    paths = [wav.with_name(f"{wav.stem}-part-{index}.wav") for index in range(2)]
+    for path, data in zip(paths, halves):
+        with wave.open(str(path), "wb") as writer:
+            writer.setparams(params)
+            writer.writeframes(data)
+    return paths
+
+
 def transcribe(binary: Path, model_file: Path, wavs: list[Path], language: str | None, batch_size: int, directory: Path, model: str = "cohere") -> dict[str, str]:
     batch_file = directory / "batch.txt"
     batch_file.write_text("".join(f"{wav}\n" for wav in wavs), encoding="utf-8")
@@ -179,12 +239,22 @@ def transcribe(binary: Path, model_file: Path, wavs: list[Path], language: str |
         raise RuntimeError(f"transcribe.cpp GPU run failed:\n{result.stderr[-3000:]}\n{result.stdout[-1000:]}")
     rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
     transcripts = {}
+    truncated = []
+    expected = {str(wav) for wav in wavs}
     for row in rows:
         if "file" in row:
             if row.get("error"):
+                if row["error"].startswith("output truncated:") and row["file"] in expected:
+                    truncated.append(Path(row["file"]))
+                    continue
                 raise RuntimeError(f"transcribe.cpp failed for {row['file']}: {row['error']}")
             transcripts[row["file"]] = row["text"]
-    if set(transcripts) != {str(wav) for wav in wavs}:
+    for wav in truncated:
+        parts = split_wav(wav)
+        print(f"Retrying truncated audio in shorter pieces: {wav}", file=sys.stderr, flush=True)
+        retry = transcribe(binary, model_file, parts, language, 1, directory, model=model)
+        transcripts[str(wav)] = join_chunks([retry[str(part)] for part in parts])
+    if set(transcripts) != expected:
         raise RuntimeError("transcribe.cpp did not return one transcript for each audio chunk")
     return transcripts
 
@@ -201,25 +271,21 @@ def main() -> None:
     require_vulkan_gpu(binary)
     model_file = resolve_model_file(args.model, args.model_id)
 
-    with tempfile.TemporaryDirectory(prefix="transcribe-cli-") as temporary:
-        root = Path(temporary)
-        chunks_by_input: dict[Path, list[Path]] = {}
-        durations: dict[Path, float] = {}
-        for index, input_file in enumerate(inputs):
-            directory = root / str(index)
-            directory.mkdir()
-            chunks, duration = convert_and_chunk(input_file, directory, CHUNK_SECONDS[args.model])
-            chunks_by_input[input_file] = chunks
-            durations[input_file] = duration
-        wavs = [chunk for chunks in chunks_by_input.values() for chunk in chunks]
-        started = time.perf_counter()
-        transcripts = transcribe(binary, model_file, wavs, language, args.batch_size or 1, root, model=args.model)
-        elapsed = time.perf_counter() - started
-        for input_file, chunks in chunks_by_input.items():
+    for input_file in inputs:
+        with tempfile.TemporaryDirectory(prefix="transcribe-cli-") as temporary:
+            root = Path(temporary)
+            print(f"Processing file: {input_file}", flush=True)
+            print(f"Input format: {describe_input(input_file)}", flush=True)
+            chunks, duration = convert_and_chunk(input_file, root, CHUNK_SECONDS[args.model])
+            print(f"Running transcribe.cpp with {args.model} on {len(chunks)} audio chunk(s)...", flush=True)
+            started = time.perf_counter()
+            transcripts = transcribe(binary, model_file, chunks, language, args.batch_size or 1, root, model=args.model)
+            elapsed = time.perf_counter() - started
             output_file = input_file.with_suffix(".txt")
             output_file.write_text(join_chunks([transcripts[str(chunk)] for chunk in chunks]) + "\n", encoding="utf-8")
             print(f"Wrote transcript to {output_file} with {model_file} using Vulkan GPU")
-            print(f"Metrics for {input_file}: {durations[input_file]:.2f}s audio; batch completed in {elapsed:.2f}s")
+            speedup = duration / elapsed if elapsed > 0 else float("inf")
+            print(f"Metrics for {input_file}: {duration:.2f}s audio; batch completed in {elapsed:.2f}s ({speedup:.2f}x)", flush=True)
 
 
 if __name__ == "__main__":
