@@ -2,19 +2,57 @@
 
 import json
 import io
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 import wave
 from pathlib import Path
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 import main as cli
 
 
 class CliTests(unittest.TestCase):
+    def test_ascii_progress_resizes_with_terminal(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        terminal = Terminal()
+        terminal.write("Running transcribe.cpp on 65 chunks...\n")
+        sizes = [os.terminal_size((160, 24)), os.terminal_size((70, 24)),
+                 os.terminal_size((25, 24))]
+        with redirect_stderr(terminal), patch.object(cli.shutil, "get_terminal_size", side_effect=sizes):
+            progress = cli.ChunkProgress(65)
+            progress.render()
+            progress.done = 32
+            progress.advance()
+            progress.close()
+        output = terminal.getvalue()
+        self.assertTrue(output.startswith("Running transcribe.cpp on 65 chunks...\n"))
+        frames = output.split("\r\033[K")[1:]
+        self.assertEqual([len(frame.rstrip("\n")) for frame in frames], [158, 68, 23])
+        self.assertTrue(all(frame.startswith("Chunks ") and "[" in frame for frame in frames))
+        self.assertIn("#", frames[-1])
+        self.assertIn("-", frames[-1])
+        self.assertTrue(output.endswith("\n"))
+
+    def test_run_batch_streams_chunk_results(self):
+        script = ("import json, sys; "
+                  "[print(json.dumps({'file': path, 'text': 'ok'}), flush=True) for path in sys.argv[1:]]; "
+                  "print('diagnostic', file=sys.stderr)")
+        wavs = [Path("first.wav"), Path("second.wav")]
+        progress_output = io.StringIO()
+        with redirect_stderr(progress_output):
+            result = cli.run_batch([sys.executable, "-c", script, *(str(wav) for wav in wavs)], wavs)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.splitlines()), 2)
+        self.assertIn("diagnostic", result.stderr)
+        self.assertEqual(progress_output.getvalue().splitlines(), ["Chunks processed: 1/2", "Chunks processed: 2/2"])
+
     def test_existing_options_and_new_parakeet(self):
         with patch.object(sys, "argv", ["main.py", "audio.wav"]):
             args = cli.parse_args()
@@ -49,13 +87,13 @@ class CliTests(unittest.TestCase):
             root = Path(temporary)
             wav = root / "audio.wav"
             output = "\n".join([json.dumps({"type": "batch_header"}), json.dumps({"file": str(wav), "text": "Hello."})])
-            with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
+            with patch.object(cli, "run_batch", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
                 result = cli.transcribe(Path("transcribe-cli"), Path("model.gguf"), [wav], None, 2, root)
             self.assertEqual(result[str(wav)], "Hello.")
             self.assertIn("vulkan", run.call_args.args[0])
             self.assertIn("--batch-size", run.call_args.args[0])
             error = json.dumps({"file": str(wav), "text": "", "error": "unsupported language"})
-            with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, error, "GPU error")):
+            with patch.object(cli, "run_batch", return_value=subprocess.CompletedProcess([], 1, error, "GPU error")):
                 with self.assertRaisesRegex(RuntimeError, "GPU error"):
                     cli.transcribe(Path("transcribe-cli"), Path("model.gguf"), [wav], None, 1, root)
 
@@ -70,7 +108,7 @@ class CliTests(unittest.TestCase):
                     writer.setframerate(16000)
                     writer.writeframes(b"\0\0" * frames)
             output = "\n".join(json.dumps({"file": str(path), "text": "ok"}) for path in wavs)
-            with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
+            with patch.object(cli, "run_batch", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
                 cli.transcribe(Path("transcribe-cli"), Path("model.gguf"), wavs, None, 2, root)
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("--batch-size") + 1], "1")
@@ -80,7 +118,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary)
             wav = root / "a.wav"
             output = json.dumps({"file": str(wav), "text": "ok"})
-            with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
+            with patch.object(cli, "run_batch", return_value=subprocess.CompletedProcess([], 0, output, "")) as run:
                 cli.transcribe(Path("transcribe-cli"), Path("model.gguf"), [wav], None, 2, root, model="parakeet")
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("--batch-size") + 1], "1")
@@ -97,7 +135,7 @@ class CliTests(unittest.TestCase):
                     writer.writeframes(b"\0\0" * (4 * cli.SAMPLE_RATE))
             calls = []
 
-            def run(command, **kwargs):
+            def run(command, batch_wavs):
                 batch = Path(command[command.index("--batch") + 1]).read_text().splitlines()
                 calls.append(batch)
                 rows = []
@@ -108,7 +146,7 @@ class CliTests(unittest.TestCase):
                         rows.append({"file": path, "text": "first" if path == str(wavs[0]) else Path(path).stem[-1]})
                 return subprocess.CompletedProcess(command, 0, "\n".join(json.dumps(row) for row in rows), "")
 
-            with patch.object(cli.subprocess, "run", side_effect=run):
+            with patch.object(cli, "run_batch", side_effect=run):
                 result = cli.transcribe(Path("transcribe-cli"), Path("model.gguf"), wavs, None, 1, root)
             self.assertEqual(result, {str(wavs[0]): "first", str(wavs[1]): "0 1"})
             self.assertEqual(len(calls), 2)
@@ -125,7 +163,7 @@ class CliTests(unittest.TestCase):
                 writer.setframerate(cli.SAMPLE_RATE)
                 writer.writeframes(b"\0\0" * cli.SAMPLE_RATE)
             error = json.dumps({"file": str(wav), "error": "output truncated: decode hit the context/generation cap before end-of-stream"})
-            with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, error, "")):
+            with patch.object(cli, "run_batch", return_value=subprocess.CompletedProcess([], 0, error, "")):
                 with self.assertRaisesRegex(RuntimeError, "still truncated audio shorter than two seconds"):
                     cli.transcribe(Path("transcribe-cli"), Path("model.gguf"), [wav], None, 1, root)
 

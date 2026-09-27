@@ -8,6 +8,8 @@ import glob
 import json
 import os
 import re
+import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -217,6 +219,86 @@ def split_wav(wav: Path) -> list[Path]:
     return paths
 
 
+class ChunkProgress:
+    def __init__(self, total: int):
+        self.total = total
+        self.done = 0
+        self.tty = sys.stderr.isatty()
+        self.width = 0
+        self.render()
+
+    def render(self) -> None:
+        if not self.tty:
+            if self.done:
+                print(f"Chunks processed: {self.done}/{self.total}", file=sys.stderr, flush=True)
+            return
+        width = shutil.get_terminal_size(fallback=(80, 24)).columns
+        if width == self.width and self.done == getattr(self, "rendered", -1):
+            return
+        self.width = width
+        self.rendered = self.done
+        label = f"Chunks {self.done}/{self.total} "
+        space = max(0, width - len(label) - 4)
+        if space >= 4:
+            filled = space * self.done // self.total
+            line = f"{label}[{'#' * filled}{'-' * (space - filled)}]"
+        else:
+            line = label.rstrip()[:max(1, width - 1)]
+        sys.stderr.write("\r\033[K" + line)
+        sys.stderr.flush()
+
+    def advance(self) -> None:
+        self.done += 1
+        self.render()
+
+    def close(self) -> None:
+        if self.tty:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+
+def run_batch(command: list[str], wavs: list[Path]) -> subprocess.CompletedProcess[str]:
+    progress = ChunkProgress(len(wavs))
+    expected = {str(wav) for wav in wavs}
+    reported: set[str] = set()
+    lines: list[str] = []
+    try:
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as errors:
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors) as process:
+                assert process.stdout is not None
+                pending = b""
+                while True:
+                    ready, _, _ = select.select([process.stdout], [], [], 0.2)
+                    if not ready:
+                        progress.render()
+                        continue
+                    data = os.read(process.stdout.fileno(), 65536)
+                    if not data:
+                        break
+                    pending += data
+                    while b"\n" in pending:
+                        raw, pending = pending.split(b"\n", 1)
+                        line = raw.decode("utf-8", errors="replace") + "\n"
+                        lines.append(line)
+                        if line.startswith("{"):
+                            try:
+                                row = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            path = row.get("file")
+                            if path in expected and path not in reported:
+                                reported.add(path)
+                                progress.advance()
+                if pending:
+                    lines.append(pending.decode("utf-8", errors="replace"))
+                returncode = process.wait()
+            errors.seek(0)
+            stderr = errors.read()
+        return subprocess.CompletedProcess(command, returncode, "".join(lines), stderr)
+    finally:
+        progress.close()
+
+
 def transcribe(binary: Path, model_file: Path, wavs: list[Path], language: str | None, batch_size: int, directory: Path, model: str = "cohere") -> dict[str, str]:
     batch_file = directory / "batch.txt"
     batch_file.write_text("".join(f"{wav}\n" for wav in wavs), encoding="utf-8")
@@ -234,7 +316,7 @@ def transcribe(binary: Path, model_file: Path, wavs: list[Path], language: str |
                str(batch_file), "--batch-jsonl", "--batch-size", str(batch_size), "--timestamps", "none"]
     if language:
         command.extend(["-l", language])
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = run_batch(command, wavs)
     if result.returncode:
         raise RuntimeError(f"transcribe.cpp GPU run failed:\n{result.stderr[-3000:]}\n{result.stdout[-1000:]}")
     rows = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
