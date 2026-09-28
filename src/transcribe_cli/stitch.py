@@ -22,7 +22,7 @@ def join_chunks(texts: Sequence[str]) -> str:
     for text in texts:
         text = text.strip()
         if text:
-            if parts and not ("一" <= last_char <= "鿿" and "一" <= text[0] <= "鿿"):
+            if parts and not ("\u4e00" <= last_char <= "\u9fff" and "\u4e00" <= text[0] <= "\u9fff"):
                 parts.append(" ")
             parts.append(text)
             last_char = text[-1]
@@ -31,13 +31,13 @@ def join_chunks(texts: Sequence[str]) -> str:
 
 def text_tokens(text: str) -> list[tuple[str, int]]:
     # Keep Han characters separate even when they touch Latin text.
-    pattern = r"[㐀-鿿]|[^\W_㐀-鿿]+(?:['’][^\W_㐀-鿿]+)*"
+    pattern = r"[\u3400-\u9fff]|[^\W_\u3400-\u9fff]+(?:['’][^\W_\u3400-\u9fff]+)*"
     return [(unicodedata.normalize("NFKC", match.group()).casefold(), match.end())
             for match in re.finditer(pattern, text, re.UNICODE)]
 
 
 def _is_han_phrase(words: Sequence[str]) -> bool:
-    return all("㐀" <= word <= "鿿" for word in words)
+    return all("\u3400" <= word <= "\u9fff" for word in words)
 
 
 def _acceptable_phrase(phrase: Sequence[str]) -> bool:

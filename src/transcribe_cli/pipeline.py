@@ -11,7 +11,7 @@ from pathlib import Path
 
 from transcribe_cli import media
 from transcribe_cli.engine import Engine, SegmentResult
-from transcribe_cli.errors import EngineError, TranscriptionError
+from transcribe_cli.errors import EngineError, OutputError, TranscriptionError
 from transcribe_cli.models import ModelSpec
 from transcribe_cli.reporting import Reporter
 from transcribe_cli.segments import (
@@ -67,7 +67,10 @@ class Transcriber:
             texts, retry_unaligned = self._texts(results, workdir)
             transcript, unaligned = stitch_chunks(texts)
             elapsed = self._clock() - started
-            output.write_text(transcript + "\n", encoding="utf-8")
+            try:
+                output.write_text(transcript + "\n", encoding="utf-8")
+            except OSError as error:
+                raise OutputError(f"Cannot write transcript {output}: {error.strerror or error}") from error
             if unaligned:
                 reporter.unaligned_overlaps(source, unaligned, retry=False)
             result = FileResult(source, output, total / SAMPLE_RATE, elapsed, unaligned + retry_unaligned)

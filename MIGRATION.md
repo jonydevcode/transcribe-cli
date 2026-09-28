@@ -1,5 +1,38 @@
 # MIGRATION.md — Re-architecting transcribe-cli
 
+## 0. Status: complete
+
+Phases 0–9 landed in `ed3d3e5`. The rest of this document is the original plan, kept as the rationale. Its line
+references point at `main.py` in `7568477`, which no longer exists. `docs/architecture.md` is the maintained
+description of the result.
+
+**What differs from the plan**
+
+- **One commit, not one per phase.** The plan's "move in one commit, change in a later one" rule was not followed, so
+  `git log -M` can't show the stitch/segment code moving verbatim. Parity rests on `tests/test_cli_e2e.py`, which
+  asserts the §4 checklist against the finished code, not against every intermediate step.
+- **Console script name:** `transcribe`, as recommended in Phase 1, so it does not collide with the upstream
+  `transcribe-cli` binary.
+- **Runtime build:** deleted, with no `--build-engine` fallback. The flake is the only supported way to get
+  transcribe.cpp. `TRANSCRIBE_CPP_BIN` covers other builds.
+- **Interface additions** (listed in `docs/architecture.md`): `Reporter.tick()` / `Engine.transcribe(on_idle=…)` so
+  the progress bar follows resizes; `ModelSpec.language_error`; a module-level `engine.require_vulkan_gpu(binary)`,
+  so the GPU check runs before the model download.
+- **Small behaviour changes:** colliding outputs are a `UsageError` (Phase 9.3). Truncation retries no longer draw
+  their own progress bar.
+- **Phase 9.4** (`max_single_call_seconds`) was not implemented, and `TODO.md` was dropped.
+
+**Follow-up fixes after review**
+
+- `TranscribeCpp.transcribe` kills transcribe.cpp if the caller stops iterating early (an error or Ctrl-C). Before
+  this, `Popen.__exit__` waited for the whole GPU run to finish.
+- An unwritable transcript location is now checked before any GPU work (`inputs.check_writable`, exit 2). A write
+  that still fails raises `OutputError` (exit 6) instead of a traceback (rule 6).
+- `inputs.expand` expands `~` before globbing, so quoted patterns like `'~/audio/*.wav'` match.
+- `stitch.py` uses `\uXXXX` escapes for the Han ranges again. The move had turned them into literal characters that
+  can't be read.
+- `docs/architecture.md` shows the real import graph. The flake reads its version from `pyproject.toml`.
+
 ## 1. Desired end state
 
 `transcribe-cli` stays a small, single-purpose, Nix-managed tool. It turns local media files into `.txt` transcripts using transcribe.cpp on a Vulkan GPU and never falls back to CPU. It gets no new features. The goal is a codebase where every concern has one home. Adding a model, changing chunking, or swapping the progress display should touch one module, and every behaviour should be testable without a GPU, FFmpeg, the network, or `patch.object` on private functions.
@@ -352,20 +385,20 @@ Make each item below as its own commit, after parity has been proven:
 
 ## 4. Behaviour parity checklist
 
-`test_cli_e2e.py` (Phase 0) must assert all of these, and they must hold after every phase up to 8:
+`test_cli_e2e.py` (Phase 0) must assert all of these, and they must hold after every phase up to 8. All items are covered by passing tests: mostly `tests/test_cli_e2e.py`, with stitching in `test_stitch.py`, the exact engine argv in `test_engine.py`, and TTY rendering in `test_reporting.py`.
 
-- [ ] `--model` choices are `cohere|qwen|parakeet|nemotron`, with `cohere` as the default.
-- [ ] Language rules: Cohere defaults to `-l en` and passes any hint, including `auto`. Nemotron passes no `-l` for unset or `auto`, and passes other values through. Parakeet accepts only `en` and passes nothing. Qwen rejects any `--language`.
-- [ ] Engine command: `-m <gguf> --backend vulkan --batch <file> --batch-jsonl --batch-size N --timestamps none [-l L]`.
-- [ ] Batch size is forced to 1 for Parakeet and Nemotron, and for chunks of mixed length.
-- [ ] A 16 kHz mono 16-bit PCM WAV is passed through with no "Converting" line. Other inputs print the "Converting…" and "Conversion completed in" lines.
-- [ ] Chunk lengths are 30/60/300/60 s. Adjacent chunks overlap by 3 s (capped at chunk/2).
-- [ ] A truncated chunk is split in half with overlap and only that chunk is retried. A segment of 2 s or less that is still truncated is an error.
-- [ ] Overlap stitching output is byte-identical on the existing stitch test corpus. The unaligned-overlap warning text is unchanged.
-- [ ] Output is `<input>.with_suffix(".txt")` with a trailing newline.
-- [ ] stdout lines: `Processing file:`, `Input format:`, `Running transcribe.cpp with … on N audio chunk(s)...`, `Wrote transcript to …`, `Metrics for …: …s audio; batch completed in …s (…x)`, printed per file as each one completes.
-- [ ] Progress goes to stderr: a resizable bar on a TTY, and `Chunks processed: i/N` lines otherwise.
-- [ ] If no Vulkan igpu/dgpu is listed, the run fails before any file is processed.
+- [x] `--model` choices are `cohere|qwen|parakeet|nemotron`, with `cohere` as the default.
+- [x] Language rules: Cohere defaults to `-l en` and passes any hint, including `auto`. Nemotron passes no `-l` for unset or `auto`, and passes other values through. Parakeet accepts only `en` and passes nothing. Qwen rejects any `--language`.
+- [x] Engine command: `-m <gguf> --backend vulkan --batch <file> --batch-jsonl --batch-size N --timestamps none [-l L]`.
+- [x] Batch size is forced to 1 for Parakeet and Nemotron, and for chunks of mixed length.
+- [x] A 16 kHz mono 16-bit PCM WAV is passed through with no "Converting" line. Other inputs print the "Converting…" and "Conversion completed in" lines.
+- [x] Chunk lengths are 30/60/300/60 s. Adjacent chunks overlap by 3 s (capped at chunk/2).
+- [x] A truncated chunk is split in half with overlap and only that chunk is retried. A segment of 2 s or less that is still truncated is an error.
+- [x] Overlap stitching output is byte-identical on the existing stitch test corpus. The unaligned-overlap warning text is unchanged.
+- [x] Output is `<input>.with_suffix(".txt")` with a trailing newline.
+- [x] stdout lines: `Processing file:`, `Input format:`, `Running transcribe.cpp with … on N audio chunk(s)...`, `Wrote transcript to …`, `Metrics for …: …s audio; batch completed in …s (…x)`, printed per file as each one completes.
+- [x] Progress goes to stderr: a resizable bar on a TTY, and `Chunks processed: i/N` lines otherwise.
+- [x] If no Vulkan igpu/dgpu is listed, the run fails before any file is processed.
 
 ---
 

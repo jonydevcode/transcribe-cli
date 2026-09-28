@@ -10,6 +10,7 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       python = pkgs.python313;
+      pyprojectToml = builtins.fromTOML (builtins.readFile ./pyproject.toml);
 
       # The pinned transcribe.cpp commit lives here and nowhere else. Re-test
       # Parakeet/Nemotron batching (`supports_batching` in models.py) when bumping it.
@@ -43,7 +44,7 @@
 
       transcribe-cli = python.pkgs.buildPythonApplication {
         pname = "transcribe-cli";
-        version = "0.1.0";
+        inherit (pyprojectToml.project) version;
         pyproject = true;
         src = ./.;
         build-system = [ python.pkgs.setuptools ];

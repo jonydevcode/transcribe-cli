@@ -10,7 +10,7 @@ import select
 import subprocess
 import tempfile
 import wave
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -72,7 +72,7 @@ class TranscribeCpp:
         return command
 
     def transcribe(self, wavs: Sequence[Path], *, batch_size: int, language: str | None,
-                   workdir: Path, on_idle: Callable[[], None] | None = None) -> Iterator[SegmentResult]:
+                   workdir: Path, on_idle: Callable[[], None] | None = None) -> Generator[SegmentResult]:
         batch_file = workdir / "batch.txt"
         batch_file.write_text("".join(f"{wav}\n" for wav in wavs), encoding="utf-8")
         if batch_size > 1 and len(wavs) > 1 and len({_frame_count(wav) for wav in wavs}) > 1:
@@ -83,30 +83,17 @@ class TranscribeCpp:
         command = self.command(batch_file, batch_size, language)
         with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as errors:
             with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors) as process:
-                assert process.stdout is not None
-                pending = b""
-                while True:
-                    ready, _, _ = select.select([process.stdout], [], [], POLL_SECONDS)
-                    if not ready:
-                        if on_idle:
-                            on_idle()
-                        continue
-                    data = os.read(process.stdout.fileno(), 65536)
-                    if not data:
-                        break
-                    pending += data
-                    *complete, pending = pending.split(b"\n")
-                    for raw in complete:
-                        stdout_tail = (stdout_tail + raw.decode("utf-8", errors="replace") + "\n")[-STDOUT_TAIL:]
-                        result = _parse_row(raw, expected, reported)
+                try:
+                    for line in _stdout_lines(process, on_idle):
+                        stdout_tail = (stdout_tail + line)[-STDOUT_TAIL:]
+                        result = _parse_row(line, expected, reported)
                         if result:
                             yield result
-                if pending:
-                    stdout_tail = (stdout_tail + pending.decode("utf-8", errors="replace"))[-STDOUT_TAIL:]
-                    result = _parse_row(pending, expected, reported)
-                    if result:
-                        yield result
-                returncode = process.wait()
+                    returncode = process.wait()
+                except BaseException:
+                    # The caller stopped early (Ctrl-C, an error); don't block on a long GPU run.
+                    process.kill()
+                    raise
             errors.seek(0)
             stderr = errors.read()
         if returncode:
@@ -115,13 +102,33 @@ class TranscribeCpp:
             raise EngineError("transcribe.cpp did not return one transcript for each audio chunk")
 
 
+def _stdout_lines(process: subprocess.Popen[bytes], on_idle: Callable[[], None] | None) -> Iterator[str]:
+    """Yield stdout lines as they arrive (newline kept), calling `on_idle` while the process is silent."""
+    assert process.stdout is not None
+    pending = b""
+    while True:
+        ready, _, _ = select.select([process.stdout], [], [], POLL_SECONDS)
+        if not ready:
+            if on_idle:
+                on_idle()
+            continue
+        data = os.read(process.stdout.fileno(), 65536)
+        if not data:
+            break
+        pending += data
+        *complete, pending = pending.split(b"\n")
+        for raw in complete:
+            yield raw.decode("utf-8", errors="replace") + "\n"
+    if pending:
+        yield pending.decode("utf-8", errors="replace")
+
+
 def _frame_count(wav: Path) -> int:
     with wave.open(str(wav), "rb") as reader:
         return reader.getnframes()
 
 
-def _parse_row(raw: bytes, expected: set[str], reported: set[str]) -> SegmentResult | None:
-    line = raw.decode("utf-8", errors="replace")
+def _parse_row(line: str, expected: set[str], reported: set[str]) -> SegmentResult | None:
     if not line.startswith("{"):
         return None
     try:

@@ -28,3 +28,7 @@ class EngineError(TranscribeCliError):
 
 class TranscriptionError(TranscribeCliError):
     exit_code = 5
+
+
+class OutputError(TranscribeCliError):
+    exit_code = 6

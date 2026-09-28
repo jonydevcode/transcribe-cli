@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from pathlib import Path
 
 import pytest
@@ -38,3 +39,23 @@ def test_transcript_paths_reject_collisions() -> None:
     assert inputs.transcript_paths([Path("a.mp3"), Path("b.wav")]) == [Path("a.txt"), Path("b.txt")]
     with pytest.raises(UsageError, match=r"a\.mp3 and a\.wav would both write a\.txt"):
         inputs.transcript_paths([Path("a.mp3"), Path("a.wav")])
+
+
+def test_expand_expands_home_before_globbing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "a.wav").touch()
+    assert inputs.expand(["~/*.wav"]) == [tmp_path / "a.wav"]
+
+
+def test_check_writable(tmp_path: Path) -> None:
+    inputs.check_writable([tmp_path / "a.txt"])
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        if os.access(locked, os.W_OK):
+            pytest.skip("running with privileges that ignore directory permissions")
+        with pytest.raises(UsageError, match="Cannot write transcript"):
+            inputs.check_writable([locked / "a.txt"])
+    finally:
+        locked.chmod(0o700)

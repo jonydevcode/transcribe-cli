@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -121,3 +122,19 @@ def test_on_idle_is_called_while_engine_is_silent(tmp_path: Path, dummy_gguf: Pa
     idle: list[int] = []
     run(TranscribeCpp(binary, dummy_gguf), [wav], tmp_path, on_idle=lambda: idle.append(1))
     assert len(idle) >= 2
+
+
+def test_closing_the_stream_early_kills_the_engine(tmp_path: Path, dummy_gguf: Path,
+                                                   wav_factory: Callable[..., Path]) -> None:
+    first, second = wav_factory("a.wav", 1), wav_factory("b.wav", 1)
+    binary = tmp_path / "hangs"
+    binary.write_text(
+        f"#!{__import__('sys').executable}\nimport json, time\n"
+        f"print(json.dumps({{'file': {str(first)!r}, 'text': 'one'}}), flush=True)\ntime.sleep(60)\n")
+    binary.chmod(0o755)
+    stream = TranscribeCpp(binary, dummy_gguf).transcribe([first, second], batch_size=1, language=None,
+                                                          workdir=tmp_path)
+    assert next(stream) == SegmentResult(first, "one", None)
+    started = time.monotonic()
+    stream.close()
+    assert time.monotonic() - started < 10

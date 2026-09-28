@@ -6,7 +6,7 @@ import pytest
 
 from conftest import RecordingReporter
 from transcribe_cli.engine import SegmentResult
-from transcribe_cli.errors import EngineError, TranscriptionError
+from transcribe_cli.errors import EngineError, OutputError, TranscriptionError
 from transcribe_cli.models import MODELS
 from transcribe_cli.pipeline import FileResult, Transcriber
 
@@ -162,3 +162,9 @@ def test_unaligned_retry_overlap_is_reported(tmp_path: Path, wav_factory: Callab
     assert result.unaligned_overlaps == 1
     assert [call[1:] for call in reporter.calls if call[0] == "unaligned_overlaps"] == [
         (tmp_path / "a.wav", 1, True)]
+
+
+def test_unwritable_output_is_an_output_error(tmp_path: Path, wav_factory: Callable[..., Path]) -> None:
+    with pytest.raises(OutputError, match="Cannot write transcript"):
+        make(FakeEngine(text("Hello.")), RecordingReporter()).transcribe_file(
+            wav_factory("a.wav", 1), tmp_path / "missing-dir" / "out.txt")

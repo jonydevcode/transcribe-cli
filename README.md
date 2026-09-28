@@ -52,7 +52,7 @@ Each source gets a same-name `.txt` file beside it. The CLI accepts MP3, M4A, MP
 
 If transcribe.cpp reaches its output limit on a chunk, the CLI retries that chunk in progressively shorter pieces while keeping the successful chunks. A persistent truncation below two seconds remains an error.
 
-Failures print `error: <message>` and exit with a code: 2 for usage errors, 3 for a missing prerequisite (no Vulkan GPU, FFmpeg, or transcribe.cpp binary), 4 for unreadable media, 5 for an engine failure, 130 after Ctrl-C.
+Failures print `error: <message>` and exit with a code: 2 for usage errors, 3 for a missing prerequisite (no Vulkan GPU, FFmpeg, or transcribe.cpp binary), 4 for unreadable media, 5 for an engine failure, 6 when a transcript cannot be written, 130 after Ctrl-C. Output locations are checked for write access before any GPU work.
 
 ## Development
 

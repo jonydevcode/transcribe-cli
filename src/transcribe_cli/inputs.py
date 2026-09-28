@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import glob
+import os
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -16,8 +17,9 @@ def expand(patterns: Iterable[str]) -> list[Path]:
     paths: list[Path] = []
     seen: set[Path] = set()
     for raw in patterns:
+        raw = os.path.expanduser(raw)  # quoted patterns such as '~/audio/*.wav' reach us unexpanded
         for match in glob.glob(raw) or [raw]:
-            path = Path(match).expanduser().resolve()
+            path = Path(match).resolve()
             if path not in seen:
                 paths.append(path)
                 seen.add(path)
@@ -44,3 +46,10 @@ def transcript_paths(sources: Sequence[Path]) -> list[Path]:
             raise UsageError(f"{owners[output]} and {source} would both write {output}")
         owners[output] = source
     return outputs
+
+
+def check_writable(outputs: Iterable[Path]) -> None:
+    """Fail before any GPU work, not after it, when a transcript cannot be written."""
+    for output in outputs:
+        if not os.access(output if output.exists() else output.parent, os.W_OK):
+            raise UsageError(f"Cannot write transcript: {output}")

@@ -48,6 +48,7 @@ def run(argv: Sequence[str] | None) -> int:
     for source in sources:
         inputs.validate(source)
     outputs = inputs.transcript_paths(sources)
+    inputs.check_writable(outputs)
     binary = locate_binary()
     require_vulkan_gpu(binary)
     model_file = resolve_model_file(spec, args.model_id)

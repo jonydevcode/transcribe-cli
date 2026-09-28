@@ -19,20 +19,20 @@ back to CPU. Every concern has one module.
 
 ## Dependencies point downward
 
+An arrow means "imports". This is the actual import graph:
+
 ```
-                cli.py
-      ┌────────┬──┴────────┬──────────────┐
-      ▼        ▼           ▼              ▼
-  inputs.py  models.py  provision.py  reporting.py (ConsoleReporter)
-                 │                        ▲ implements
-                 ▼                        │
-             pipeline.py ──── Reporter protocol
-      ┌─────────┼──────────┬──────────┐
-      ▼         ▼          ▼          ▼
-  media.py  segments.py  stitch.py  engine.py
-                                      │
-                                      ▼
-                                  errors.py (imported by all)
+cli.py ──────► inputs · provision · models · engine (TranscribeCpp) · reporting (ConsoleReporter)
+  │
+  ▼
+pipeline.py ─► models (ModelSpec) · engine (Engine protocol, SegmentResult) · reporting (Reporter protocol)
+  │
+  ├──► media.py ──► segments (SAMPLE_RATE)
+  ├──► segments.py
+  └──► stitch.py
+
+errors.py is imported by every module except stitch.py.
+Type-only imports (under TYPE_CHECKING): reporting → pipeline.FileResult, media → reporting.Reporter.
 ```
 
 `pipeline.py` never imports `cli.py` or `ConsoleReporter`. `stitch.py` and `segments.py` import nothing from the
