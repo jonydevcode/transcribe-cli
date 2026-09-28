@@ -177,14 +177,59 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cli.expand_input_paths([str(root / "*.wav"), str(first)]), [first, second])
         self.assertEqual(cli.join_chunks(["你好", "世界", "Hello"]), "你好世界 Hello")
 
+    def test_overlap_stitch_preserves_unmatched_words(self):
+        self.assertEqual(cli.text_tokens("Hello你好世界"),
+                         [("hello", 5), ("你", 6), ("好", 7), ("世", 8), ("界", 9)])
+        self.assertEqual(cli.stitch_chunks([
+            "Please review the guest room door.",
+            "the guest room door. Please find the exits.",
+        ]), ("Please review the guest room door. Please find the exits.", 0))
+        self.assertEqual(cli.stitch_chunks([
+            "Please open the door.",
+            "Do not open the door. There is smoke outside.",
+        ]), ("Please open the door. Do not open the door. There is smoke outside.", 1))
+        self.assertEqual(cli.stitch_chunks([
+            "They tell guests to open the big red heavy door.",
+            "Do not open the big red heavy door. It is dangerous.",
+        ]), ("They tell guests to open the big red heavy door. "
+             "Do not open the big red heavy door. It is dangerous.", 1))
+        self.assertEqual(cli.stitch_chunks([
+            "If the door is warm or impassable, please wet towels at the",
+            "Impossible please web towels at the base of the door.",
+        ]), ("If the door is warm or impassable, please wet towels at the base of the door.", 0))
+        self.assertEqual(cli.stitch_chunks(["天气很好我们出去散步", "我们出去散步然后吃饭"]),
+                         ("天气很好我们出去散步然后吃饭", 0))
+        self.assertEqual(cli.stitch_chunks(["Yes yes yes.", "Yes yes yes, please."]),
+                         ("Yes yes yes. Yes yes yes, please.", 1))
+
     def test_ffmpeg_conversion_and_chunking(self):
         source = Path(__file__).with_name("sample_15s.aac")
         with tempfile.TemporaryDirectory() as temporary:
             chunks, duration = cli.convert_and_chunk(source, Path(temporary), 5)
             self.assertGreater(duration, 15)
-            self.assertEqual(len(chunks), 4)
+            self.assertEqual(len(chunks), 6)
             for chunk in chunks:
                 self.assertTrue(chunk.is_file())
+
+    def test_full_chunks_overlap_by_three_seconds(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.wav"
+            with wave.open(str(source), "wb") as writer:
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(cli.SAMPLE_RATE)
+                writer.writeframes(b"\0\0" * (65 * cli.SAMPLE_RATE))
+            chunks, duration = cli.convert_and_chunk(source, root, 30)
+            self.assertEqual(duration, 65)
+            self.assertEqual(len(chunks), 3)
+            lengths = []
+            for chunk in chunks:
+                with wave.open(str(chunk), "rb") as reader:
+                    lengths.append(reader.getnframes())
+            self.assertEqual(lengths, [30 * cli.SAMPLE_RATE, 30 * cli.SAMPLE_RATE,
+                                       11 * cli.SAMPLE_RATE])
+            self.assertEqual(sum(lengths), (65 + 2 * cli.CHUNK_OVERLAP_SECONDS) * cli.SAMPLE_RATE)
 
     def test_wav_passthrough_and_model_chunk_limits(self):
         self.assertEqual(cli.CHUNK_SECONDS, {"cohere": 30, "qwen": 60, "parakeet": 300, "nemotron": 60})
@@ -202,7 +247,7 @@ class CliTests(unittest.TestCase):
                     self.assertEqual((chunks, duration), ([source], 2.0))
                 run.assert_not_called()
             chunks, duration = cli.convert_and_chunk(source, root, 1)
-            self.assertEqual((len(chunks), duration), (2, 2.0))
+            self.assertEqual((len(chunks), duration), (3, 2.0))
             self.assertTrue(all(chunk != source for chunk in chunks))
 
     def test_multiple_files_report_each_completion_and_speed(self):

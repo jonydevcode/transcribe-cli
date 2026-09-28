@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import glob
 import json
 import os
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import wave
 from pathlib import Path
 
@@ -32,6 +34,7 @@ SAMPLE_RATE = 16000
 # Practical chunk sizes for bounded GPU memory use. The upstream per-call
 # limits describe what the model accepts, not what fits in available memory.
 CHUNK_SECONDS = {"cohere": 30, "qwen": 60, "parakeet": 300, "nemotron": 60}
+CHUNK_OVERLAP_SECONDS = 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,42 +180,104 @@ def convert_and_chunk(input_file: Path, directory: Path, chunk_seconds: int | No
             raise ValueError(f"Decoded audio was empty: {input_file}")
         if chunk_seconds is None or total_frames <= chunk_seconds * SAMPLE_RATE:
             return [wav], total_frames / SAMPLE_RATE
+        chunk_frames = chunk_seconds * SAMPLE_RATE
+        overlap_frames = min(CHUNK_OVERLAP_SECONDS * SAMPLE_RATE, chunk_frames // 2)
         chunks: list[Path] = []
-        index = 0
-        while reader.tell() < total_frames:
-            data = reader.readframes(chunk_seconds * SAMPLE_RATE)
-            chunk = directory / f"chunk-{index:04d}.wav"
+        start = 0
+        while start < total_frames:
+            end = min(start + chunk_frames, total_frames)
+            reader.setpos(start)
+            data = reader.readframes(end - start)
+            chunk = directory / f"chunk-{len(chunks):04d}.wav"
             with wave.open(str(chunk), "wb") as writer:
                 writer.setnchannels(1)
                 writer.setsampwidth(2)
                 writer.setframerate(SAMPLE_RATE)
                 writer.writeframes(data)
             chunks.append(chunk)
-            index += 1
+            if end == total_frames:
+                break
+            start = end - overlap_frames
         return chunks, total_frames / SAMPLE_RATE
 
 
 def join_chunks(texts: list[str]) -> str:
-    result = ""
+    parts: list[str] = []
+    last_char = ""
     for text in texts:
         text = text.strip()
         if text:
-            if result and not ("\u4e00" <= result[-1] <= "\u9fff" and "\u4e00" <= text[0] <= "\u9fff"):
-                result += " "
-            result += text
-    return result
+            if parts and not ("\u4e00" <= last_char <= "\u9fff" and "\u4e00" <= text[0] <= "\u9fff"):
+                parts.append(" ")
+            parts.append(text)
+            last_char = text[-1]
+    return "".join(parts)
 
 
-def split_wav(wav: Path) -> list[Path]:
+def text_tokens(text: str) -> list[tuple[str, int]]:
+    # Keep Han characters separate even when they touch Latin text.
+    pattern = r"[\u3400-\u9fff]|[^\W_\u3400-\u9fff]+(?:['’][^\W_\u3400-\u9fff]+)*"
+    return [(unicodedata.normalize("NFKC", match.group()).casefold(), match.end())
+            for match in re.finditer(pattern, text, re.UNICODE)]
+
+
+def overlap_offset(previous: str, following: str) -> int | None:
+    left = text_tokens(previous)[-32:]
+    right = text_tokens(following)[:32]
+    left_words = [word for word, _ in left]
+    right_words = [word for word, _ in right]
+    for size in range(min(len(left), len(right)), 2, -1):
+        phrase = left_words[-size:]
+        if len(set(phrase)) < 2 or (all("\u3400" <= word <= "\u9fff" for word in phrase) and size < 6):
+            continue
+        if phrase == right_words[:size]:
+            return right[size - 1][1]
+    # Permit a few differently recognized words before a shared edge phrase.
+    for block in difflib.SequenceMatcher(None, left_words, right_words, autojunk=False).get_matching_blocks():
+        if (block.size < 3 or block.a + block.size != len(left)
+                or not 1 <= block.b <= 6 or block.a < block.b):
+            continue
+        phrase = left_words[block.a:block.a + block.size]
+        if len(set(phrase)) < 2 or (all("\u3400" <= word <= "\u9fff" for word in phrase) and block.size < 6):
+            continue
+        preceding = zip(left_words[block.a - block.b:block.a], right_words[:block.b])
+        if all(difflib.SequenceMatcher(None, a, b).ratio() >= 0.6 for a, b in preceding):
+            return right[block.b + block.size - 1][1]
+    return None
+
+
+def stitch_chunks(texts: list[str]) -> tuple[str, int]:
+    parts: list[str] = []
+    unresolved = 0
+    previous = ""
+    for text in texts:
+        text = text.strip()
+        original = text
+        if previous and text:
+            offset = overlap_offset(previous, text)
+            if offset is None:
+                unresolved += 1
+            else:
+                text = text[offset:].lstrip(" \t\r\n.,!?;:。？！、，")
+        parts.append(text)
+        previous = original
+    return join_chunks(parts), unresolved
+
+
+def split_wav(wav: Path, directory: Path) -> list[Path]:
     with wave.open(str(wav), "rb") as reader:
         frames = reader.getnframes()
         midpoint = frames // 2
         if midpoint < SAMPLE_RATE:
             raise RuntimeError(f"transcribe.cpp still truncated audio shorter than two seconds: {wav}")
         params = reader.getparams()
-        halves = [reader.readframes(midpoint), reader.readframes(frames - midpoint)]
-    paths = [wav.with_name(f"{wav.stem}-part-{index}.wav") for index in range(2)]
-    for path, data in zip(paths, halves):
+        overlap = min(CHUNK_OVERLAP_SECONDS * SAMPLE_RATE, frames // 4)
+        ranges = [(0, midpoint + overlap // 2), (midpoint - overlap // 2, frames)]
+    paths = [directory / f"{wav.stem}-part-{index}.wav" for index in range(2)]
+    for path, (start, end) in zip(paths, ranges):
+        with wave.open(str(wav), "rb") as reader:
+            reader.setpos(start)
+            data = reader.readframes(end - start)
         with wave.open(str(path), "wb") as writer:
             writer.setparams(params)
             writer.writeframes(data)
@@ -332,10 +397,12 @@ def transcribe(binary: Path, model_file: Path, wavs: list[Path], language: str |
                 raise RuntimeError(f"transcribe.cpp failed for {row['file']}: {row['error']}")
             transcripts[row["file"]] = row["text"]
     for wav in truncated:
-        parts = split_wav(wav)
+        parts = split_wav(wav, directory)
         print(f"Retrying truncated audio in shorter pieces: {wav}", file=sys.stderr, flush=True)
         retry = transcribe(binary, model_file, parts, language, 1, directory, model=model)
-        transcripts[str(wav)] = join_chunks([retry[str(part)] for part in parts])
+        transcripts[str(wav)], unresolved = stitch_chunks([retry[str(part)] for part in parts])
+        if unresolved:
+            print(f"Warning: could not align {unresolved} retry overlap(s) for {wav}", file=sys.stderr, flush=True)
     if set(transcripts) != expected:
         raise RuntimeError("transcribe.cpp did not return one transcript for each audio chunk")
     return transcripts
@@ -362,9 +429,13 @@ def main() -> None:
             print(f"Running transcribe.cpp with {args.model} on {len(chunks)} audio chunk(s)...", flush=True)
             started = time.perf_counter()
             transcripts = transcribe(binary, model_file, chunks, language, args.batch_size or 1, root, model=args.model)
+            transcript, unresolved = stitch_chunks([transcripts[str(chunk)] for chunk in chunks])
             elapsed = time.perf_counter() - started
             output_file = input_file.with_suffix(".txt")
-            output_file.write_text(join_chunks([transcripts[str(chunk)] for chunk in chunks]) + "\n", encoding="utf-8")
+            output_file.write_text(transcript + "\n", encoding="utf-8")
+            if unresolved:
+                print(f"Warning: could not align {unresolved} chunk overlap(s) for {input_file}; "
+                      "check for repeated words", file=sys.stderr, flush=True)
             print(f"Wrote transcript to {output_file} with {model_file} using Vulkan GPU")
             speedup = duration / elapsed if elapsed > 0 else float("inf")
             print(f"Metrics for {input_file}: {duration:.2f}s audio; batch completed in {elapsed:.2f}s ({speedup:.2f}x)", flush=True)
