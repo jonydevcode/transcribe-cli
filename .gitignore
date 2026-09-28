@@ -31,3 +31,5 @@ wheels/
 
 *.txt
 inputs/
+result
+result-*

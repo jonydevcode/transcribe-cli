@@ -1,3 +1,6 @@
+> **Historical.** This document measured the earlier PyTorch implementation, not transcribe.cpp. Its
+> `--batch-size 8` advice does not apply: the current default is 1 to limit GPU memory use.
+
 # AMD Radeon 860M Performance Notes
 
 This document summarizes performance testing of
