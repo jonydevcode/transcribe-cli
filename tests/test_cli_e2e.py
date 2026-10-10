@@ -87,6 +87,23 @@ def test_aac_fixture_is_converted(fake_engine: FakeEngineBinary, dummy_gguf: Pat
     assert len(fake_engine.calls()[0]["paths"]) == 1
 
 
+def test_opus_file_is_converted(fake_engine: FakeEngineBinary, dummy_gguf: Path,
+                                wav_factory: Callable[..., Path]) -> None:
+    wav = wav_factory("voice.wav", 2)
+    source = wav.with_suffix(".opus")
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(wav), "-c:a", "libopus", str(source)],
+                   check=True)
+    wav.unlink()
+    result = run_cli(fake_engine, dummy_gguf, source)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[1] == "Input format: OPUS audio, 48 kHz, mono"
+    assert lines[2] == f"Converting to 16-bit PCM WAV, 16 kHz, mono: {source}"
+    assert source.with_suffix(".txt").read_text() == "ok\n"
+    (call,) = fake_engine.calls()
+    assert call["paths"][0].endswith("audio.wav")
+
+
 def test_long_file_is_chunked_and_stitched(fake_engine: FakeEngineBinary, dummy_gguf: Path,
                                            wav_factory: Callable[..., Path]) -> None:
     fake_engine.configure(texts={

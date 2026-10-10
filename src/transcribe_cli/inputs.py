@@ -10,7 +10,7 @@ from pathlib import Path
 
 from transcribe_cli.errors import UsageError
 
-SUPPORTED_EXTENSIONS = frozenset({".mp3", ".m4a", ".mp4", ".ogg", ".wav", ".flac", ".aac", ".webm"})
+SUPPORTED_EXTENSIONS = frozenset({".mp3", ".m4a", ".mp4", ".ogg", ".opus", ".wav", ".flac", ".aac", ".webm"})
 
 
 def expand(patterns: Iterable[str]) -> list[Path]:

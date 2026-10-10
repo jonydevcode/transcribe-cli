@@ -23,6 +23,10 @@ def test_validate(tmp_path: Path) -> None:
     good = tmp_path / "a.WAV"
     good.touch()
     inputs.validate(good)
+    for name in ("voice.opus", "voice.OPUS"):
+        opus = tmp_path / name
+        opus.touch()
+        inputs.validate(opus)
     with pytest.raises(UsageError, match="not found"):
         inputs.validate(tmp_path / "nope.wav")
     bad = tmp_path / "a.txt"
