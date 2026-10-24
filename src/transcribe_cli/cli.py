@@ -7,7 +7,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from transcribe_cli import inputs
+from transcribe_cli import inputs, media
 from transcribe_cli.engine import TranscribeCpp, require_vulkan_gpu
 from transcribe_cli.errors import TranscribeCliError
 from transcribe_cli.models import DEFAULT_MODEL, MODELS, language_help, resolve_model_file
@@ -49,6 +49,8 @@ def run(argv: Sequence[str] | None) -> int:
         inputs.validate(source)
     outputs = inputs.transcript_paths(sources)
     inputs.check_writable(outputs)
+    for source in sources:
+        media.describe(source)  # fail before any GPU work when FFmpeg cannot read an input's audio
     binary = locate_binary()
     require_vulkan_gpu(binary)
     model_file = resolve_model_file(spec, args.model_id)

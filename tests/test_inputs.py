@@ -19,20 +19,13 @@ def test_expand_keeps_unmatched_pattern(tmp_path: Path) -> None:
     assert inputs.expand([str(tmp_path / "missing.wav")]) == [tmp_path / "missing.wav"]
 
 
-def test_validate(tmp_path: Path) -> None:
-    good = tmp_path / "a.WAV"
-    good.touch()
-    inputs.validate(good)
-    for name in ("voice.opus", "voice.OPUS"):
-        opus = tmp_path / name
-        opus.touch()
-        inputs.validate(opus)
+def test_validate_checks_existence_not_extension(tmp_path: Path) -> None:
+    for name in ("a.WAV", "voice.opus", "movie.mkv", "no-extension"):
+        source = tmp_path / name
+        source.touch()
+        inputs.validate(source)
     with pytest.raises(UsageError, match="not found"):
         inputs.validate(tmp_path / "nope.wav")
-    bad = tmp_path / "a.txt"
-    bad.touch()
-    with pytest.raises(UsageError, match="Unsupported input format: .txt"):
-        inputs.validate(bad)
 
 
 def test_transcript_path() -> None:
@@ -43,6 +36,8 @@ def test_transcript_paths_reject_collisions() -> None:
     assert inputs.transcript_paths([Path("a.mp3"), Path("b.wav")]) == [Path("a.txt"), Path("b.txt")]
     with pytest.raises(UsageError, match=r"a\.mp3 and a\.wav would both write a\.txt"):
         inputs.transcript_paths([Path("a.mp3"), Path("a.wav")])
+    with pytest.raises(UsageError, match=r"a\.txt would be overwritten by its own transcript"):
+        inputs.transcript_paths([Path("a.txt")])
 
 
 def test_expand_expands_home_before_globbing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

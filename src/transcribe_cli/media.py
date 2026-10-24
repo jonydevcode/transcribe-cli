@@ -54,7 +54,7 @@ def describe(path: Path) -> str:
     layout = "mono" if channels == 1 else "stereo" if channels == 2 else f"{channels} channels"
     rate = int(stream["sample_rate"]) / 1000
     container = path.suffix[1:].upper()
-    format_name = f"{codec} audio" if codec == container else f"{codec} {container}"
+    format_name = f"{codec} audio" if codec == container or not container else f"{codec} {container}"
     return f"{format_name}, {rate:g} kHz, {layout}"
 
 

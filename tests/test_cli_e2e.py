@@ -104,6 +104,21 @@ def test_opus_file_is_converted(fake_engine: FakeEngineBinary, dummy_gguf: Path,
     assert call["paths"][0].endswith("audio.wav")
 
 
+def test_mkv_file_is_converted(fake_engine: FakeEngineBinary, dummy_gguf: Path,
+                               wav_factory: Callable[..., Path]) -> None:
+    wav = wav_factory("movie.wav", 2, rate=44100, channels=2)
+    source = wav.with_suffix(".mkv")
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(wav), "-c:a", "flac", str(source)],
+                   check=True)
+    wav.unlink()
+    result = run_cli(fake_engine, dummy_gguf, source)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[1] == "Input format: 16-bit FLAC MKV, 44.1 kHz, stereo"
+    assert lines[2] == f"Converting to 16-bit PCM WAV, 16 kHz, mono: {source}"
+    assert source.with_suffix(".txt").read_text() == "ok\n"
+
+
 def test_long_file_is_chunked_and_stitched(fake_engine: FakeEngineBinary, dummy_gguf: Path,
                                            wav_factory: Callable[..., Path]) -> None:
     fake_engine.configure(texts={
@@ -277,13 +292,16 @@ def test_per_file_engine_error_is_reported(fake_engine: FakeEngineBinary, dummy_
     assert "unsupported language" in result.stderr
 
 
-def test_missing_input_and_bad_extension(fake_engine: FakeEngineBinary, dummy_gguf: Path, tmp_path: Path) -> None:
+def test_missing_or_unreadable_input_fails_before_any_work(fake_engine: FakeEngineBinary, dummy_gguf: Path,
+                                                            wav_factory: Callable[..., Path], tmp_path: Path) -> None:
     result = run_cli(fake_engine, dummy_gguf, tmp_path / "nope.wav")
     assert result.returncode != 0 and "Input file not found" in result.stderr
-    text = tmp_path / "notes.txt"
-    text.touch()
-    result = run_cli(fake_engine, dummy_gguf, text)
-    assert result.returncode != 0 and "Unsupported input format" in result.stderr
+    good = wav_factory("good.wav", 1)
+    notes = tmp_path / "notes.md"
+    notes.write_text("not audio\n")
+    result = run_cli(fake_engine, dummy_gguf, good, notes)
+    assert result.returncode == 4 and str(notes) in result.stderr
+    assert fake_engine.calls() == [] and not good.with_suffix(".txt").exists()
 
 
 def test_missing_gguf_is_an_error(fake_engine: FakeEngineBinary, wav_factory: Callable[..., Path],

@@ -10,8 +10,6 @@ from pathlib import Path
 
 from transcribe_cli.errors import UsageError
 
-SUPPORTED_EXTENSIONS = frozenset({".mp3", ".m4a", ".mp4", ".ogg", ".opus", ".wav", ".flac", ".aac", ".webm"})
-
 
 def expand(patterns: Iterable[str]) -> list[Path]:
     paths: list[Path] = []
@@ -27,10 +25,9 @@ def expand(patterns: Iterable[str]) -> list[Path]:
 
 
 def validate(path: Path) -> None:
+    """Existence only: any container FFmpeg can decode is accepted, so `media.describe` checks the format."""
     if not path.is_file():
         raise UsageError(f"Input file not found: {path}")
-    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        raise UsageError(f"Unsupported input format: {path.suffix}")
 
 
 def transcript_path(source: Path) -> Path:
@@ -42,6 +39,8 @@ def transcript_paths(sources: Sequence[Path]) -> list[Path]:
     outputs = [transcript_path(source) for source in sources]
     owners: dict[Path, Path] = {}
     for source, output in zip(sources, outputs, strict=True):
+        if output == source:
+            raise UsageError(f"{source} would be overwritten by its own transcript")
         if output in owners:
             raise UsageError(f"{owners[output]} and {source} would both write {output}")
         owners[output] = source
